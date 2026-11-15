@@ -76,11 +76,43 @@ npm test
 
 ---
 
-## البناء والنشر (Deployment / Vercel)
+## النشر على Render (Node.js Web Service)
 
-يتضمن المشروع ملف `vercel.json` جاهزاً لتوجيه واجهة React SPA ومسارات `/api/*`:
+المشروع تطبيق Full-Stack: واجهة React/Vite وخادم Express وواجهات API. لذلك يجب نشره كـ **Web Service** وليس Static Site. يوجد ملف `render.yaml` جاهز لإعداد الخدمة وفحص الصحة تلقائياً.
+
+### إعدادات Render
+
+- **Repository:** مستودع `restaurant-bot` على GitHub
+- **Root Directory:** اتركه فارغاً (جذر المستودع)
+- **Runtime:** Node
+- **Build Command:** `npm install && npm run build`
+- **Start Command:** `npm start`
+- **Health Check Path:** `/api/health`
+- **Node.js:** `22.14.0` (محدد في `.node-version`)
+
+يمكن استخدام **New → Blueprint** واختيار المستودع ليقرأ Render ملف `render.yaml`، أو إنشاء Web Service يدوياً بنفس الإعدادات.
+
+### متغيرات البيئة المطلوبة
+
+اضبطها من Render → الخدمة → Environment. لا تضع القيم السرية في GitHub أو داخل ملفات الواجهة.
+
+- `ADMIN_PASSWORD`: كلمة مرور قوية وفريدة للمدير (مطلوبة في الإنتاج).
+- `ADMIN_SESSION_SECRET`: سر عشوائي طويل وفريد لتوقيع جلسات المدير (مطلوب في الإنتاج؛ يمكن لـ Render توليده من Blueprint).
+- `ADMIN_EMAIL`: بريد المدير.
+- `GEMINI_API_KEY`: اختياري، لكنه مطلوب لتفعيل مساعد Gemini.
+- `VITE_SUPABASE_URL` و`VITE_SUPABASE_ANON_KEY`: إعدادات Supabase العامة التي تُضمّن وقت بناء الواجهة.
+- `SUPABASE_SERVICE_ROLE_KEY`: مفتاح سري للخادم فقط؛ لا تشاركه ولا تضعه في متغير يبدأ بـ `VITE_`.
+
+### تنبيه مهم حول حفظ البيانات
+
+خطة Render المجانية تستخدم نظام ملفات مؤقتاً ولا توفر Persistent Disk. عند ترك Supabase غير مهيأ، يخزن التطبيق بياناته محلياً في `.data/db.json` والصور في `.data/uploads`، وقد تُفقد هذه البيانات عند إعادة التشغيل أو إعادة النشر. للاستخدام الحقيقي، اربط Supabase ونفّذ `supabase/schema.sql` أو ملف الترحيل الموجود في `supabase/migrations`، واضبط متغيرات Supabase أعلاه. كما أن خدمة Render المجانية تدخل في وضع السكون بعد 15 دقيقة من عدم النشاط وقد تستغرق نحو دقيقة للاستيقاظ.
+
+### اختبار محلي قبل النشر
 
 ```bash
+npm install
 npm run build
-npm run start
+NODE_ENV=production ADMIN_PASSWORD='ضع-كلمة-مرور-قوية' ADMIN_SESSION_SECRET='ضع-سراً-عشوائياً-طويلاً' npm start
 ```
+
+بعد النشر، افتح `/api/health` ويجب أن يعيد JSON يحتوي على `ok: true`.
