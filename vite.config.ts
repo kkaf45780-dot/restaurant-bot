@@ -5,12 +5,16 @@ import { defineConfig } from 'vite';
 import { cloudflare } from '@cloudflare/vite-plugin';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// Netlify serves the static SPA from `dist`; the Cloudflare Worker build
+// (wrangler.jsonc) only applies when building for Cloudflare.
+const isNetlify = process.env.NETLIFY === 'true';
+
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
-      cloudflare({ viteEnvironment: { name: 'worker' } }),
+      !isNetlify && cloudflare({ viteEnvironment: { name: 'worker' } }),
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg', 'apple-touch-icon.png'],
@@ -97,7 +101,7 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {
