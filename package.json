@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/e2e.test.ts"
+    "test": "tsx tests/e2e.test.ts",
+    "cf-typegen": "wrangler types",
+    "deploy": "vite build && wrangler deploy",
+    "cf:dev": "vite"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",
@@ -37,7 +40,9 @@
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "@types/express": "^4.17.21"
+    "@types/express": "^4.17.21",
+    "@cloudflare/vite-plugin": "^1.15.0",
+    "wrangler": "^4.44.0"
   },
   "engines": {
     "node": ">=22.12.0"
