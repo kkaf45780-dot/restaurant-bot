@@ -116,3 +116,44 @@ NODE_ENV=production ADMIN_PASSWORD='ضع-كلمة-مرور-قوية' ADMIN_SESSI
 ```
 
 بعد النشر، افتح `/api/health` ويجب أن يعيد JSON يحتوي على `ok: true`.
+
+---
+
+## النشر على Cloudflare (الخطة المجانية — Workers + Static Assets)
+
+تم تجهيز المشروع للعمل على **Cloudflare Free Plan** عبر ملف `wrangler.jsonc` ونقطة الدخول `src/worker.ts` (مع الإبقاء على `server.ts` للتشغيل المحلي على Node.js):
+
+- **الملفات الثابتة والواجهة (`dist/`)**: تُخدم مجاناً بلا حدود للطلبات عبر Cloudflare Assets مع دعم SPA Fallback.
+- **نقاط الـ API (`/api/*`)**: تعمل داخل Cloudflare Worker بحد الخطة المجانية (حتى 100,000 طلب يومياً مجاناً).
+
+### الطريقة الأولى: الربط المباشر مع GitHub من لوحة Cloudflare
+1. من لوحة **Cloudflare Dashboard → Workers & Pages → Create → Import a repository**.
+2. اختر مستودع `restaurant-bot` واضبط الأوامر التالية:
+   - **Build command:** `npm run build`
+   - **Deploy command:** `npx wrangler deploy`
+3. من **Settings → Variables and Secrets** أضف المتغيرات:
+   - `GEMINI_API_KEY`: مفتاح Gemini API (للمساعد الذكي).
+   - `ADMIN_EMAIL`: بريد المدير (مثلاً `admin@hara-grill.eg`).
+   - `ADMIN_PASSWORD`: كلمة مرور قوية للمدير.
+   - `ADMIN_SESSION_SECRET`: نص عشوائي طويل لتوقيع الجلسات.
+   - *(اختياري لقاعدة البيانات)* `VITE_SUPABASE_URL`، `VITE_SUPABASE_ANON_KEY`، و`SUPABASE_SERVICE_ROLE_KEY`.
+
+### الطريقة الثانية: النشر من جهازك عبر Wrangler CLI
+```bash
+npm install
+npx wrangler login
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put ADMIN_SESSION_SECRET
+npm run cf:deploy
+```
+
+### حفظ البيانات على الخطة المجانية
+- **الخيار الموصى به**: ربط مشروع **Supabase** (خطة مجانية) عبر المتغيرات أعلاه لتخزين كامل للطلبات والمنيو والصور.
+- **بديل مجاني داخل Cloudflare (بدون قاعدة بيانات خارجية)**: إنشاء مساحة **Cloudflare KV** مجانية بالأمر:
+  ```bash
+  npx wrangler kv namespace create RESTAURANT_DB
+  ```
+  ثم فك التعليق عن قسم `kv_namespaces` في `wrangler.jsonc` ووضع المعرّف الناتج.
+- في حال عدم تفعيل Supabase أو KV، يعمل التطبيق ببيانات المطعم الافتراضية في الذاكرة المؤقتة للمعاينة السريعة.
+
