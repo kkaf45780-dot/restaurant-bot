@@ -74,10 +74,10 @@ export function AboutView({
 
         <div className="lg:col-span-4 bg-white/10 border border-white/15 rounded-2xl p-5 space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-white/75">الحالة الآن</span>
+            <span className="text-xs text-white/90">الحالة الآن</span>
             <span
               className={`px-3 py-1 rounded-full text-xs font-bold ${
-                hoursStatus.isOpen ? 'bg-[#16A34A] text-white' : 'bg-[#DC2626] text-white'
+                hoursStatus.isOpen ? 'bg-[#15803D] text-white' : 'bg-[#DC2626] text-white'
               }`}
             >
               {hoursStatus.isOpen ? 'مفتوح الآن' : 'مغلق الآن'}

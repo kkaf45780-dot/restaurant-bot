@@ -7,20 +7,17 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "not_found_handling": "none",
+    "run_worker_first": true
   },
   "vars": {
-    "ADMIN_EMAIL": "admin@hara-grill.eg"
+    "APP_VERSION": "2.0.0"
   }
-  // اختياري للخطة المجانية عند عدم استخدام Supabase:
-  // يمكنك ربط Cloudflare KV مجاناً لحفظ الطلبات والمنيو بدلاً من الذاكرة المؤقتة:
-  // 1) نفّذ الأمر: npx wrangler kv namespace create RESTAURANT_DB
-  // 2) أزل التعليق أدناه وضع الـ id الناتج:
+  // Bind Cloudflare KV for distributed rate-limiting & state:
+  // npx wrangler kv namespace create RATE_LIMIT_KV
+  // npx wrangler kv namespace create RESTAURANT_DB
   // "kv_namespaces": [
-  //   {
-  //     "binding": "RESTAURANT_DB",
-  //     "id": "REPLACE_WITH_KV_NAMESPACE_ID"
-  //   }
+  //   { "binding": "RATE_LIMIT_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" },
+  //   { "binding": "RESTAURANT_DB", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
   // ]
 }

@@ -197,6 +197,9 @@ async function runLiveE2ETests(): Promise<void> {
         const html = await res.text();
         assert.ok(html.includes('<div id="root"></div>'), `Missing root mount on ${route}`);
       }
+
+      const unknownRes = await fetch(`${BASE_URL}/nonexistent-pentest-path-xyz`);
+      assert.equal(unknownRes.status, 404, 'Expected real HTTP 404 on unknown route');
     });
 
     await runTest('api: GET /api/restaurant and POST /api/coupons/validate work', async () => {
@@ -224,8 +227,13 @@ async function runLiveE2ETests(): Promise<void> {
       assert.equal(couponData.discountAmount, 34);
     });
 
-    const ownerPassword = process.env.ADMIN_PASSWORD || 'Admin@1234';
-    const ownerEmail = process.env.ADMIN_EMAIL || 'admin@hara-grill.eg';
+    const ownerPassword = process.env.TEST_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || '';
+    const ownerEmail = process.env.TEST_ADMIN_EMAIL || process.env.ADMIN_EMAIL || '';
+
+    if (!ownerEmail || !ownerPassword) {
+      console.warn('SKIP  Live admin E2E tests (set TEST_ADMIN_EMAIL & TEST_ADMIN_PASSWORD in env)');
+      return;
+    }
 
     // Login as owner
     const loginRes = await fetch(`${BASE_URL}/api/admin/login`, {
@@ -250,35 +258,38 @@ async function runLiveE2ETests(): Promise<void> {
     });
     assert.equal(forceOpenRes.status, 200);
 
-    await runTest('rbac live: kitchen employee gets 403 on settings but 200 on overview', async () => {
-      const kitchenEmail = 'kitchen@hara-grill.eg';
-      const kLogin = await fetch(`${BASE_URL}/api/admin/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: kitchenEmail, password: ownerPassword }),
-      });
-      assert.equal(kLogin.status, 200);
-      const kData = (await kLogin.json()) as { token: string; role: string };
-      assert.equal(kData.role, 'kitchen');
+    const kitchenPassword = process.env.TEST_KITCHEN_PASSWORD || '';
+    if (kitchenPassword) {
+      await runTest('rbac live: kitchen employee gets 403 on settings but 200 on overview', async () => {
+        const kitchenEmail = 'kitchen@hara-grill.eg';
+        const kLogin = await fetch(`${BASE_URL}/api/admin/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: kitchenEmail, password: kitchenPassword }),
+        });
+        assert.equal(kLogin.status, 200);
+        const kData = (await kLogin.json()) as { token: string; role: string };
+        assert.equal(kData.role, 'kitchen');
 
-      const forbiddenRes = await fetch(`${BASE_URL}/api/admin/restaurant`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${kData.token}`,
-        },
-        body: JSON.stringify({ name: 'محاولة غير مصرح بها' }),
-      });
-      assert.equal(forbiddenRes.status, 403);
+        const forbiddenRes = await fetch(`${BASE_URL}/api/admin/restaurant`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${kData.token}`,
+          },
+          body: JSON.stringify({ name: 'محاولة غير مصرح بها' }),
+        });
+        assert.equal(forbiddenRes.status, 403);
 
-      const allowedOverview = await fetch(`${BASE_URL}/api/admin/overview`, {
-        headers: { Authorization: `Bearer ${kData.token}` },
+        const allowedOverview = await fetch(`${BASE_URL}/api/admin/overview`, {
+          headers: { Authorization: `Bearer ${kData.token}` },
+        });
+        assert.equal(allowedOverview.status, 200);
       });
-      assert.equal(allowedOverview.status, 200);
-    });
+    }
 
     await runTest(
-      'order lifecycle + stock deduction/restore + idempotency + rating + CSV export',
+      'order lifecycle + stock deduction/restore + idempotency + token tracking + rating + CSV export',
       async () => {
         // Read initial stock of item_kebab_kofta_mix
         const beforeBundle = (await (await fetch(`${BASE_URL}/api/restaurant`)).json()) as {
@@ -306,10 +317,11 @@ async function runLiveE2ETests(): Promise<void> {
         });
         assert.equal(createRes.status, 201);
         const created = (await createRes.json()) as {
-          order: { id: string; orderNumber: string; total: number; status: string };
+          order: { id: string; orderNumber: string; orderToken: string; total: number; status: string };
           whatsappUrl: string;
         };
         assert.equal(created.order.status, 'received');
+        assert.ok(created.order.orderToken);
         assert.equal(created.order.total, 705); // 340 * 2 + 25 delivery
         assert.ok(created.whatsappUrl.includes('wa.me/'));
 
@@ -327,11 +339,23 @@ async function runLiveE2ETests(): Promise<void> {
         assert.equal(dupData.deduplicated, true);
         assert.equal(dupData.order.id, created.order.id);
 
-        // Tracking check
-        const trackRes = await fetch(
+        // Legacy sequential orderNumber tracking must be rejected (400)
+        const legacyTrackRes = await fetch(
           `${BASE_URL}/api/orders/track?orderNumber=${encodeURIComponent(created.order.orderNumber)}`
         );
+        assert.equal(legacyTrackRes.status, 400);
+
+        // Secure token tracking check (masked PII)
+        const trackRes = await fetch(
+          `${BASE_URL}/api/orders/track?token=${encodeURIComponent(created.order.orderToken)}`
+        );
         assert.equal(trackRes.status, 200);
+        const tracked = (await trackRes.json()) as {
+          tracking: { customerPhone?: string; customerAddress?: string; customerNameMasked: string };
+        };
+        assert.equal(tracked.tracking.customerPhone, undefined);
+        assert.equal(tracked.tracking.customerAddress, undefined);
+        assert.ok(tracked.tracking.customerNameMasked.endsWith('***'));
 
         // Accept order -> verify stock deducted by 2
         const acceptRes = await fetch(
@@ -355,7 +379,7 @@ async function runLiveE2ETests(): Promise<void> {
             ?.stockQuantity ?? 0;
         assert.equal(stockAfterAccept, initialStock - 2);
 
-        // Mark delivered -> submit rating 5 stars
+        // Mark delivered -> submit rating 5 stars via orderToken
         const deliverRes = await fetch(
           `${BASE_URL}/api/admin/orders/${created.order.id}/status`,
           {
@@ -369,17 +393,20 @@ async function runLiveE2ETests(): Promise<void> {
         );
         assert.equal(deliverRes.status, 200);
 
-        const rateRes = await fetch(`${BASE_URL}/api/orders/${created.order.orderNumber}/rate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rating: 5, comment: 'ممتاز وساخن جداً' }),
-        });
+        const rateRes = await fetch(
+          `${BASE_URL}/api/orders/${encodeURIComponent(created.order.orderToken)}/rate`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rating: 5, comment: 'ممتاز وساخن جداً' }),
+          }
+        );
         assert.equal(rateRes.status, 200);
         const rated = (await rateRes.json()) as {
-          order: { rating: number; ratingComment: string };
+          tracking: { rating: number; ratingComment: string };
         };
-        assert.equal(rated.order.rating, 5);
-        assert.equal(rated.order.ratingComment, 'ممتاز وساخن جداً');
+        assert.equal(rated.tracking.rating, 5);
+        assert.equal(rated.tracking.ratingComment, 'ممتاز وساخن جداً');
 
         // CSV export contains orderNumber and rating header
         const csvRes = await fetch(`${BASE_URL}/api/admin/orders/export`, {

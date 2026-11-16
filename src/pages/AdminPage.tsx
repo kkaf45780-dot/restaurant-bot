@@ -50,6 +50,7 @@ import {
   adminMarkNotificationsRead,
   adminReorderItems,
   adminUpdateOrderStatus,
+  adminUpdatePassword,
   adminUpdateRestaurant,
   adminUploadImage,
   adminUpsertBranch,
@@ -60,7 +61,6 @@ import {
   adminUpsertMenuItem,
   fetchAdminMe,
   fetchAdminOverview,
-  fetchConfigStatus,
   getStoredAdminToken,
   setStoredAdminToken,
 } from '../lib/api.ts';
@@ -108,9 +108,14 @@ interface AdminPageProps {
 export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   const [token, setToken] = useState<string | null>(() => getStoredAdminToken());
   const [checkingAuth, setCheckingAuth] = useState(true);
-  const [adminEmail, setAdminEmail] = useState('admin@hara-grill.eg');
+  const [adminEmail, setAdminEmail] = useState('');
   const [adminRole, setAdminRole] = useState<EmployeeRole>('owner');
-  const [demoAdminEmail, setDemoAdminEmail] = useState('admin@hara-grill.eg');
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+
+  const [forceCurrPass, setForceCurrPass] = useState('');
+  const [forceNewPass, setForceNewPass] = useState('');
+  const [forcePassError, setForcePassError] = useState<string | null>(null);
+  const [forcePassSaving, setForcePassSaving] = useState(false);
 
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -164,14 +169,6 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      try {
-        const cfg = await fetchConfigStatus();
-        if (mounted) setConfigStatus(cfg);
-        if (mounted && cfg.demoAdminEmail) setDemoAdminEmail(cfg.demoAdminEmail);
-      } catch {
-        // Ignore
-      }
-
       const stored = getStoredAdminToken();
       if (stored) {
         try {
@@ -179,8 +176,12 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
           if (mounted) {
             if (me.email) setAdminEmail(me.email);
             if (me.role) setAdminRole(me.role);
+            const mustChange = Boolean(me.mustChangePassword);
+            setMustChangePassword(mustChange);
             setToken(stored);
-            await loadOverview(stored);
+            if (!mustChange) {
+              await loadOverview(stored);
+            }
           }
         } catch {
           setStoredAdminToken(null);
@@ -229,24 +230,69 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
     [orders]
   );
 
-  const handleLoginSuccess = async (newToken: string) => {
+  const handleLoginSuccess = async (
+    newToken: string,
+    loginEmail?: string,
+    initialMustChange?: boolean
+  ) => {
     setStoredAdminToken(newToken);
     setToken(newToken);
+    if (loginEmail) setAdminEmail(loginEmail);
+    let mustChange = Boolean(initialMustChange);
     try {
       const me = await fetchAdminMe(newToken);
       if (me.email) setAdminEmail(me.email);
       if (me.role) setAdminRole(me.role);
+      mustChange = Boolean(me.mustChangePassword);
     } catch {
       setAdminRole('owner');
     }
-    await loadOverview(newToken);
+    setMustChangePassword(mustChange);
+    if (!mustChange) {
+      await loadOverview(newToken);
+    }
   };
 
   const handleLogout = async () => {
     setStoredAdminToken(null);
     setToken(null);
+    setMustChangePassword(false);
     if (supabase) {
       await supabase.auth.signOut().catch(() => {});
+    }
+  };
+
+  const handleForcedPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setForcePassError(null);
+    if (
+      forceNewPass.length < 10 ||
+      !/[A-Z]/.test(forceNewPass) ||
+      !/[a-z]/.test(forceNewPass) ||
+      !/\d/.test(forceNewPass)
+    ) {
+      setForcePassError(
+        'كلمة المرور الجديدة يجب أن تكون 10 أحرف على الأقل وتحتوي على حرف كبير وحرف صغير ورقم.'
+      );
+      return;
+    }
+
+    setForcePassSaving(true);
+    try {
+      const res = await adminUpdatePassword(token, forceCurrPass, forceNewPass);
+      const nextToken = res.token || token;
+      setStoredAdminToken(nextToken);
+      setToken(nextToken);
+      setMustChangePassword(false);
+      setForceCurrPass('');
+      setForceNewPass('');
+      await loadOverview(nextToken);
+      notify('success', 'تم تحديث كلمة المرور بنجاح وتفعيل الجلسة.');
+    } catch (err) {
+      setForcePassError(err instanceof Error ? err.message : 'تعذر تغيير كلمة المرور.');
+    } finally {
+      setForcePassSaving(false);
     }
   };
 
@@ -261,10 +307,93 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   if (!token) {
     return (
       <AdminLogin
-        demoAdminEmail={demoAdminEmail}
         onSuccess={handleLoginSuccess}
         onBackToStore={onNavigateCustomer}
       />
+    );
+  }
+
+  if (mustChangePassword) {
+    return (
+      <div className="min-h-screen bg-[#F8F5EE] flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl border border-[#1B4D3E]/15 p-6 sm:p-8 space-y-5 shadow-sm">
+          <div>
+            <span className="inline-block px-3 py-1 rounded-full bg-[#FEF3C7] text-[#92400E] text-xs font-extrabold mb-2">
+              إجراء أمني إلزامي
+            </span>
+            <h1 className="text-xl font-extrabold text-[#18221D]">
+              تغيير كلمة المرور الافتراضية
+            </h1>
+            <p className="text-sm text-[#4A5850] mt-1 leading-relaxed">
+              لحماية لوحة التحكم، يجب تعيين كلمة مرور شخصية قوية قبل متابعة الدخول ({adminEmail}).
+            </p>
+          </div>
+
+          <form onSubmit={handleForcedPasswordSubmit} className="space-y-4">
+            <div>
+              <label
+                htmlFor="force-current-password"
+                className="block text-xs font-bold text-[#35443C] mb-1.5"
+              >
+                كلمة المرور الحالية
+              </label>
+              <input
+                id="force-current-password"
+                type="password"
+                dir="ltr"
+                required
+                value={forceCurrPass}
+                onChange={(e) => setForceCurrPass(e.target.value)}
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/15 text-sm text-[#18221D] text-left focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/25"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="force-new-password"
+                className="block text-xs font-bold text-[#35443C] mb-1.5"
+              >
+                كلمة المرور الجديدة (10 أحرف، كبير وصغير ورقم)
+              </label>
+              <input
+                id="force-new-password"
+                type="password"
+                dir="ltr"
+                required
+                minLength={10}
+                value={forceNewPass}
+                onChange={(e) => setForceNewPass(e.target.value)}
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/15 text-sm text-[#18221D] text-left focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/25"
+              />
+            </div>
+
+            {forcePassError && (
+              <div
+                role="alert"
+                className="rounded-xl bg-[#FEE2E2]/80 border border-[#B91C1C]/20 p-3 text-xs font-semibold text-[#991B1B]"
+              >
+                {forcePassError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={forcePassSaving}
+              className="w-full min-h-[48px] rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:opacity-50 text-white text-sm font-bold cursor-pointer"
+            >
+              {forcePassSaving ? 'جاري التحديث...' : 'حفظ كلمة المرور والدخول'}
+            </button>
+          </form>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="w-full min-h-[40px] rounded-xl border border-[#1B4D3E]/20 text-xs font-bold text-[#35443C] hover:bg-[#F8F5EE] cursor-pointer"
+          >
+            تسجيل الخروج
+          </button>
+        </div>
+      </div>
     );
   }
 
@@ -511,7 +640,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
           />
           <div className="min-w-0">
             <p className="text-base font-extrabold tracking-tight leading-tight">موظف المطعم</p>
-            <p className="text-[11px] text-white/75 truncate mt-0.5">{bundle.restaurant.name}</p>
+            <p className="text-[11px] text-white/90 truncate mt-0.5">{bundle.restaurant.name}</p>
           </div>
         </div>
 
@@ -565,7 +694,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         <button
           type="button"
           onClick={handleLogout}
-          className="w-full min-h-[40px] px-3.5 rounded-xl text-white/80 hover:bg-white/10 text-xs font-bold flex items-center gap-2 cursor-pointer"
+          className="w-full min-h-[40px] px-3.5 rounded-xl text-white/90 hover:bg-white/10 text-xs font-bold flex items-center gap-2 cursor-pointer"
         >
           <LogOut className="w-4 h-4" />
           <span>تسجيل الخروج</span>

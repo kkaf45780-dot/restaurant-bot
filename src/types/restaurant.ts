@@ -126,6 +126,8 @@ export interface Employee {
   phone: string;
   role: EmployeeRole;
   isActive: boolean;
+  passwordHash?: string;
+  mustChangePassword?: boolean;
   createdAt: string;
 }
 
@@ -182,6 +184,7 @@ export interface OrderItem {
 export interface Order {
   id: string;
   orderNumber: string;
+  orderToken: string;
   restaurantId: string;
   customerName: string;
   customerPhone: string;
@@ -205,6 +208,25 @@ export interface Order {
   idempotencyKey?: string;
   status: OrderStatus;
   statusHistory: OrderStatusHistoryEntry[];
+  rating?: number;
+  ratingComment?: string;
+  ratedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PublicOrderTracking {
+  orderToken: string;
+  orderNumberMasked: string;
+  customerNameMasked: string;
+  fulfillmentType: FulfillmentType;
+  status: OrderStatus;
+  statusHistory: OrderStatusHistoryEntry[];
+  estimatedDeliveryText?: string;
+  itemsCount: number;
+  total: number;
+  deliveryZoneName?: string;
+  branchName?: string;
   rating?: number;
   ratingComment?: string;
   ratedAt?: string;
@@ -322,10 +344,14 @@ export interface ChatMessage {
   suggestedAction?: SuggestedChatAction;
 }
 
+export interface PublicConfigStatus {
+  ok: boolean;
+  version: string;
+}
+
 export interface ServiceConfigStatus {
   geminiConfigured: boolean;
   supabaseConfigured: boolean;
   storageMode: 'supabase' | 'local';
   authMode: 'supabase' | 'local';
-  demoAdminEmail: string;
 }

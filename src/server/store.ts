@@ -3,6 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
+  COMPROMISED_DEFAULT_PASSWORDS,
+  constantTimeEqual,
+  hashPasswordBcrypt,
+  verifyPasswordAgainstHash,
+} from '../../worker/auth.ts';
+import {
+  findOrderByTokenSupabase,
+  incrementCouponUsageSupabase,
+  insertOrderItemsSupabase,
+} from '../../worker/db/supabase.ts';
+import {
   DEFAULT_RESTAURANT_ID,
   INITIAL_ACTIVITY_LOGS,
   INITIAL_BRANCHES,
@@ -153,12 +164,14 @@ function migrateLocalDb(rawDb: Partial<LocalDatabaseSchema>): {
     if (
       normalizedStatus !== ord.status ||
       !ord.fulfillmentType ||
+      !ord.orderToken ||
       !Array.isArray(ord.statusHistory)
     ) {
       changed = true;
     }
     return {
       ...ord,
+      orderToken: ord.orderToken || crypto.randomUUID(),
       fulfillmentType: ord.fulfillmentType ?? 'delivery',
       discountAmount: Number(ord.discountAmount ?? 0),
       paymentMethod: ord.paymentMethod ?? 'cash_on_delivery',
@@ -172,7 +185,9 @@ function migrateLocalDb(rawDb: Partial<LocalDatabaseSchema>): {
   });
 
   const inventoryMovements = rawDb.inventoryMovements ?? seed.inventoryMovements;
-  const employees = rawDb.employees?.length ? rawDb.employees : seed.employees;
+  const rawEmployees = rawDb.employees?.length ? rawDb.employees : seed.employees;
+  const employees = rawEmployees.filter((e) => e.email.toLowerCase() !== 'admin@hara-grill.eg');
+  if (employees.length !== rawEmployees.length) changed = true;
   const activityLogs = rawDb.activityLogs ?? seed.activityLogs;
   const notifications = rawDb.notifications ?? seed.notifications;
   const aiLogs = rawDb.aiLogs ?? [];
@@ -277,6 +292,7 @@ function mapSupabaseOrder(row: Record<string, unknown>): Order {
   return {
     id: String(row.id),
     orderNumber: String(row.order_number),
+    orderToken: String(row.order_token || row.id),
     restaurantId: String(row.restaurant_id),
     customerName: String(row.customer_name),
     customerPhone: String(row.customer_phone),
@@ -762,6 +778,10 @@ export async function deleteCoupon(restaurantId: string, couponId: string): Prom
 
 export async function incrementCouponUsage(restaurantId: string, code: string): Promise<void> {
   const upper = code.trim().toUpperCase();
+  const supabase = getSupabaseAdminClient();
+  if (supabase) {
+    await incrementCouponUsageSupabase(supabase, restaurantId, upper).catch(() => {});
+  }
   const db = readLocalDb();
   const idx = db.coupons.findIndex(
     (c) => c.restaurantId === restaurantId && c.code.toUpperCase() === upper
@@ -785,11 +805,32 @@ export async function listOrders(restaurantId: string): Promise<Order[]> {
       return data.map((row) => mapSupabaseOrder(row));
     }
   }
+  if (process.env.REQUIRE_SUPABASE === 'true') {
+    throw new Error('Supabase database is required in production mode.');
+  }
 
   const db = readLocalDb();
   return db.orders
     .filter((o) => o.restaurantId === restaurantId)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+export async function findOrderByToken(
+  restaurantId: string,
+  orderToken: string
+): Promise<Order | null> {
+  const clean = orderToken.trim();
+  if (!clean) return null;
+  const supabase = getSupabaseAdminClient();
+  if (supabase) {
+    const remote = await findOrderByTokenSupabase(supabase, restaurantId, clean);
+    if (remote) return remote;
+  }
+  if (process.env.REQUIRE_SUPABASE === 'true' && !supabase) {
+    throw new Error('Supabase database is required in production mode.');
+  }
+  const db = readLocalDb();
+  return db.orders.find((o) => o.restaurantId === restaurantId && o.orderToken === clean) ?? null;
 }
 
 export async function findOrderByNumberOrId(
@@ -822,56 +863,69 @@ export async function findOrderByIdempotencyKey(
 }
 
 export async function createOrder(order: Order): Promise<Order> {
+  const safeOrder: Order = {
+    ...order,
+    orderToken: order.orderToken || crypto.randomUUID(),
+  };
   const supabase = getSupabaseAdminClient();
   if (supabase) {
     const { error } = await supabase.from('orders').insert({
-      id: order.id,
-      order_number: order.orderNumber,
-      restaurant_id: order.restaurantId,
-      customer_name: order.customerName,
-      customer_phone: order.customerPhone,
-      fulfillment_type: order.fulfillmentType,
-      delivery_zone_id: order.deliveryZoneId,
-      delivery_zone_name: order.deliveryZoneName,
-      branch_id: order.branchId ?? null,
-      branch_name: order.branchName ?? null,
-      customer_address: order.customerAddress,
-      notes: order.notes,
-      items: order.items,
-      subtotal: order.subtotal,
-      discount_amount: order.discountAmount,
-      coupon_code: order.couponCode ?? null,
-      delivery_fee: order.deliveryFee,
-      total: order.total,
-      payment_method: order.paymentMethod,
-      payment_status: order.paymentStatus,
-      estimated_delivery_text: order.estimatedDeliveryText ?? null,
-      stock_deducted: Boolean(order.stockDeducted),
-      idempotency_key: order.idempotencyKey ?? null,
-      status: order.status,
-      status_history: order.statusHistory,
-      created_at: order.createdAt,
-      updated_at: order.updatedAt,
+      id: safeOrder.id,
+      order_number: safeOrder.orderNumber,
+      order_token: safeOrder.orderToken,
+      restaurant_id: safeOrder.restaurantId,
+      customer_name: safeOrder.customerName,
+      customer_phone: safeOrder.customerPhone,
+      fulfillment_type: safeOrder.fulfillmentType,
+      delivery_zone_id: safeOrder.deliveryZoneId,
+      delivery_zone_name: safeOrder.deliveryZoneName,
+      branch_id: safeOrder.branchId ?? null,
+      branch_name: safeOrder.branchName ?? null,
+      customer_address: safeOrder.customerAddress,
+      notes: safeOrder.notes,
+      items: safeOrder.items,
+      subtotal: safeOrder.subtotal,
+      discount_amount: safeOrder.discountAmount,
+      coupon_code: safeOrder.couponCode ?? null,
+      delivery_fee: safeOrder.deliveryFee,
+      total: safeOrder.total,
+      payment_method: safeOrder.paymentMethod,
+      payment_status: safeOrder.paymentStatus,
+      estimated_delivery_text: safeOrder.estimatedDeliveryText ?? null,
+      stock_deducted: Boolean(safeOrder.stockDeducted),
+      idempotency_key: safeOrder.idempotencyKey ?? null,
+      status: safeOrder.status,
+      status_history: safeOrder.statusHistory,
+      created_at: safeOrder.createdAt,
+      updated_at: safeOrder.updatedAt,
     });
-    if (!error) return order;
+    if (!error) {
+      await insertOrderItemsSupabase(supabase, safeOrder).catch(() => {});
+      return safeOrder;
+    }
+    if (process.env.REQUIRE_SUPABASE === 'true') {
+      throw new Error('Failed to persist order to Supabase.');
+    }
+  } else if (process.env.REQUIRE_SUPABASE === 'true') {
+    throw new Error('Supabase configuration is required in production mode.');
   }
 
   const db = readLocalDb();
-  db.orders.unshift(order);
+  db.orders.unshift(safeOrder);
 
   // Add notification & activity log
   db.notifications.unshift({
     id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-    restaurantId: order.restaurantId,
+    restaurantId: safeOrder.restaurantId,
     type: 'order',
-    title: `طلب جديد #${order.orderNumber}`,
-    message: `طلب من ${order.customerName} بقيمة ${order.total} ج.م.`,
+    title: `طلب جديد #${safeOrder.orderNumber}`,
+    message: `طلب من ${safeOrder.customerName} بقيمة ${safeOrder.total} ج.م.`,
     isRead: false,
-    createdAt: order.createdAt,
+    createdAt: safeOrder.createdAt,
   });
   db.notifications = db.notifications.slice(0, 40);
   writeLocalDb(db);
-  return order;
+  return safeOrder;
 }
 
 export async function adjustItemStock(params: {
@@ -1066,20 +1120,26 @@ export async function updateOrderStatus(
   return updatedOrder;
 }
 
-export async function rateOrder(
+export async function rateOrderByToken(
   restaurantId: string,
-  orderNumber: string,
+  orderToken: string,
   rating: number,
   comment: string
 ): Promise<Order | null> {
-  const cleanNum = orderNumber.replace(/^#/, '').trim();
+  const cleanToken = orderToken.trim();
+  if (!cleanToken) return null;
   const db = readLocalDb();
   const idx = db.orders.findIndex(
-    (o) => o.restaurantId === restaurantId && (o.orderNumber === cleanNum || o.id === cleanNum)
+    (o) => o.restaurantId === restaurantId && o.orderToken === cleanToken
   );
-  if (idx < 0) return null;
 
-  const target = db.orders[idx];
+  const supabase = getSupabaseAdminClient();
+  let target: Order | null = idx >= 0 ? db.orders[idx] : null;
+  if (!target && supabase) {
+    target = await findOrderByTokenSupabase(supabase, restaurantId, cleanToken);
+  }
+  if (!target) return null;
+
   if (target.status !== 'delivered') {
     throw new Error('يمكن تقييم الطلب فقط بعد تمام التوصيل.');
   }
@@ -1092,10 +1152,11 @@ export async function rateOrder(
     ratedAt: nowIso,
     updatedAt: nowIso,
   };
-  db.orders[idx] = updated;
-  writeLocalDb(db);
+  if (idx >= 0) {
+    db.orders[idx] = updated;
+    writeLocalDb(db);
+  }
 
-  const supabase = getSupabaseAdminClient();
   if (supabase) {
     try {
       await supabase
@@ -1115,6 +1176,15 @@ export async function rateOrder(
   return updated;
 }
 
+export async function rateOrder(
+  restaurantId: string,
+  orderToken: string,
+  rating: number,
+  comment: string
+): Promise<Order | null> {
+  return rateOrderByToken(restaurantId, orderToken, rating, comment);
+}
+
 export async function listInventoryMovements(restaurantId: string): Promise<InventoryMovement[]> {
   const db = readLocalDb();
   return db.inventoryMovements.filter((m) => m.restaurantId === restaurantId);
@@ -1123,7 +1193,9 @@ export async function listInventoryMovements(restaurantId: string): Promise<Inve
 // Employees CRUD
 export async function listEmployees(restaurantId: string): Promise<Employee[]> {
   const db = readLocalDb();
-  return db.employees.filter((e) => e.restaurantId === restaurantId);
+  return db.employees
+    .filter((e) => e.restaurantId === restaurantId)
+    .map(({ passwordHash: _omitted, ...safe }) => safe);
 }
 
 export async function findEmployeeByEmail(
@@ -1131,7 +1203,7 @@ export async function findEmployeeByEmail(
   email: string
 ): Promise<Employee | null> {
   const clean = email.trim().toLowerCase();
-  const db = readLocalDb();
+  const db = await readLocalDb();
   return (
     db.employees.find(
       (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean && e.isActive
@@ -1142,10 +1214,17 @@ export async function findEmployeeByEmail(
 export async function upsertEmployee(emp: Employee): Promise<Employee> {
   const db = readLocalDb();
   const idx = db.employees.findIndex((e) => e.id === emp.id);
-  if (idx >= 0) db.employees[idx] = emp;
-  else db.employees.unshift(emp);
+  const existing = idx >= 0 ? db.employees[idx] : null;
+  const toSave: Employee = {
+    ...emp,
+    passwordHash: emp.passwordHash ?? existing?.passwordHash,
+    mustChangePassword: emp.mustChangePassword ?? existing?.mustChangePassword,
+  };
+  if (idx >= 0) db.employees[idx] = toSave;
+  else db.employees.unshift(toSave);
   writeLocalDb(db);
-  return emp;
+  const { passwordHash: _omitted, ...safe } = toSave;
+  return safe;
 }
 
 export async function deleteEmployee(restaurantId: string, employeeId: string): Promise<void> {
@@ -1236,38 +1315,42 @@ export async function listAiLogs(restaurantId: string): Promise<AILogEntry[]> {
   return db.aiLogs.filter((l) => l.restaurantId === restaurantId);
 }
 
-function hashPasswordNode(password: string, saltHex?: string): string {
-  const salt = saltHex || crypto.randomBytes(16).toString('hex');
-  const hashHex = crypto.pbkdf2Sync(password, salt, 10000, 32, 'sha256').toString('hex');
-  return `pbkdf2$${salt}$${hashHex}`;
+export function isLocalOwnerPasswordOverridden(): boolean {
+  if (process.env.ADMIN_PASSWORD_HASH?.trim()) return true;
+  const db = readLocalDb();
+  return Boolean(db.adminPasswordOverride);
 }
 
-function safeEqualStrings(a: string, b: string): boolean {
-  const aBuf = Buffer.from(a, 'utf-8');
-  const bBuf = Buffer.from(b, 'utf-8');
-  if (aBuf.length !== bBuf.length) return false;
-  return crypto.timingSafeEqual(aBuf, bBuf);
-}
+export async function verifyLocalAdminPassword(candidate: string): Promise<boolean> {
+  if (!candidate || COMPROMISED_DEFAULT_PASSWORDS.has(candidate)) {
+    return false;
+  }
 
-export function verifyLocalAdminPassword(candidate: string): boolean {
   const db = readLocalDb();
   const stored = db.adminPasswordOverride;
   if (stored) {
-    if (stored.startsWith('pbkdf2$')) {
-      const [, salt, expectedHash] = stored.split('$');
-      if (!salt || !expectedHash) return false;
-      const computed = hashPasswordNode(candidate, salt).split('$')[2] || '';
-      return safeEqualStrings(computed, expectedHash);
-    }
-    return safeEqualStrings(candidate, stored);
+    return verifyPasswordAgainstHash(candidate, stored);
   }
-  const envPass = process.env.ADMIN_PASSWORD || 'Admin@1234';
-  return safeEqualStrings(candidate, envPass);
+
+  const envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+  if (envHash) {
+    return verifyPasswordAgainstHash(candidate, envHash);
+  }
+
+  const initialPass = (
+    process.env.ADMIN_INITIAL_PASSWORD ||
+    process.env.ADMIN_PASSWORD ||
+    ''
+  ).trim();
+  if (!initialPass || COMPROMISED_DEFAULT_PASSWORDS.has(initialPass)) {
+    return false;
+  }
+  return constantTimeEqual(candidate, initialPass);
 }
 
-export function setLocalAdminPassword(newPassword: string): void {
+export async function setLocalAdminPassword(newPassword: string): Promise<void> {
   const db = readLocalDb();
-  db.adminPasswordOverride = hashPasswordNode(newPassword);
+  db.adminPasswordOverride = await hashPasswordBcrypt(newPassword);
   writeLocalDb(db);
 }
 

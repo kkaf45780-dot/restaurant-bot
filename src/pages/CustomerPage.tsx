@@ -20,7 +20,16 @@ import {
   useOnlineStatus,
   usePWAInstall,
 } from '../hooks/usePWAOnlineTheme.ts';
-import { fetchRestaurantBundle, sendChatMessage } from '../lib/api.ts';
+import { ChatApiError, fetchRestaurantBundle, sendChatMessage } from '../lib/api.ts';
+import {
+  clearStoredChat,
+  getChatOptOut,
+  loadStoredChat,
+  loadStoredDraft,
+  saveStoredChat,
+  saveStoredDraft,
+  setChatOptOut,
+} from '../lib/chat-storage.ts';
 import type { RestaurantHoursStatus } from '../lib/hours.ts';
 import { buildDraftLineKey } from '../lib/pricing.ts';
 import type {
@@ -30,12 +39,13 @@ import type {
   OrderDraft,
   OrderDraftItem,
   RestaurantBundle,
+  SuggestedChatAction,
 } from '../types/restaurant.ts';
 
 interface CustomerPageProps {
   route: CustomerRoute;
-  initialTrackOrderNumber?: string;
-  onNavigateRoute: (route: CustomerRoute, trackOrder?: string) => void;
+  initialTrackOrderToken?: string;
+  onNavigateRoute: (route: CustomerRoute, trackOrderToken?: string) => void;
   onNavigateAdmin: () => void;
 }
 
@@ -57,7 +67,7 @@ const CACHED_BUNDLE_KEY = 'moazzaf_cached_bundle_v1';
 
 export function CustomerPage({
   route,
-  initialTrackOrderNumber,
+  initialTrackOrderToken,
   onNavigateRoute,
   onNavigateAdmin,
 }: CustomerPageProps) {
@@ -78,6 +88,9 @@ export function CustomerPage({
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatOptOut, setChatOptOutState] = useState(false);
+  const [chatCaptchaRequired, setChatCaptchaRequired] = useState(false);
+  const [pendingChatMessage, setPendingChatMessage] = useState<string | null>(null);
   const [orderDraft, setOrderDraft] = useState<OrderDraft>(EMPTY_DRAFT);
   const [confirmedOrderState, setConfirmedOrderState] = useState<{
     order: Order;
@@ -113,34 +126,22 @@ export function CustomerPage({
   const hydrateAfterBundle = useCallback((loadedBundle: RestaurantBundle) => {
     document.title = `موظف المطعم — ${loadedBundle.restaurant.name}`;
     const restId = loadedBundle.restaurant.id;
-    const savedChat = localStorage.getItem(`chat_${restId}`);
-    const savedDraft = localStorage.getItem(`draft_${restId}`);
+    const optedOut = getChatOptOut(restId);
+    setChatOptOutState(optedOut);
 
-    if (savedChat) {
-      try {
-        const parsed = JSON.parse(savedChat) as ChatMessage[];
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed.slice(-20));
-        } else {
-          setMessages([
-            {
-              id: 'welcome_1',
-              role: 'assistant',
-              text: loadedBundle.restaurant.aiSettings.welcomeMessage,
-              timestamp: new Date().toISOString(),
-            },
-          ]);
-        }
-      } catch {
-        setMessages([
-          {
-            id: 'welcome_1',
-            role: 'assistant',
-            text: loadedBundle.restaurant.aiSettings.welcomeMessage,
-            timestamp: new Date().toISOString(),
-          },
-        ]);
-      }
+    const savedChat = loadStoredChat(restId);
+    const savedDraft = loadStoredDraft(restId);
+
+    if (savedChat && savedChat.length > 0) {
+      setMessages(
+        savedChat.slice(-20).map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+          timestamp: m.timestamp,
+          suggestedAction: m.suggestedAction as SuggestedChatAction | undefined,
+        }))
+      );
     } else {
       setMessages([
         {
@@ -153,11 +154,9 @@ export function CustomerPage({
     }
 
     if (savedDraft) {
-      try {
-        setOrderDraft({ ...EMPTY_DRAFT, ...(JSON.parse(savedDraft) as OrderDraft) });
-      } catch {
-        setOrderDraft(EMPTY_DRAFT);
-      }
+      setOrderDraft({ ...EMPTY_DRAFT, ...savedDraft });
+    } else {
+      setOrderDraft(EMPTY_DRAFT);
     }
   }, []);
 
@@ -209,21 +208,18 @@ export function CustomerPage({
 
   useEffect(() => {
     if (!bundle) return;
-    try {
-      localStorage.setItem(`chat_${bundle.restaurant.id}`, JSON.stringify(messages.slice(-20)));
-    } catch {
-      // Ignore
+    if (chatOptOut) {
+      clearStoredChat(bundle.restaurant.id);
+      return;
     }
-  }, [bundle, messages]);
+    saveStoredChat(bundle.restaurant.id, messages.slice(-20));
+  }, [bundle, messages, chatOptOut]);
 
   useEffect(() => {
     if (!bundle) return;
-    try {
-      localStorage.setItem(`draft_${bundle.restaurant.id}`, JSON.stringify(orderDraft));
-    } catch {
-      // Ignore
-    }
-  }, [bundle, orderDraft]);
+    if (chatOptOut) return;
+    saveStoredDraft(bundle.restaurant.id, orderDraft);
+  }, [bundle, orderDraft, chatOptOut]);
 
   useEffect(() => {
     try {
@@ -374,17 +370,40 @@ export function CustomerPage({
     onNavigateRoute('checkout');
   };
 
-  const handleSendMessage = async (text: string) => {
-    if (!bundle || !isOnline) return;
-    const userMsg: ChatMessage = {
-      id: `usr_${Date.now()}`,
-      role: 'user',
-      text,
-      timestamp: new Date().toISOString(),
-    };
+  const handleToggleChatOptOut = (nextOptOut: boolean) => {
+    setChatOptOutState(nextOptOut);
+    if (bundle) {
+      setChatOptOut(bundle.restaurant.id, nextOptOut);
+      if (nextOptOut) {
+        showToast('تم إيقاف حفظ المحادثات ومسح السجل المحلي.');
+      } else {
+        showToast('تم تفعيل حفظ المحادثة مؤقتاً (يحذف تلقائياً بعد ٢٤ ساعة).');
+      }
+    }
+  };
 
-    const nextHistory = [...messages, userMsg];
-    setMessages(nextHistory);
+  const handleSendMessage = async (text: string, captchaToken?: string) => {
+    if (!bundle || !isOnline) return;
+
+    const lastMsg = messages[messages.length - 1];
+    const isCaptchaRetry = Boolean(
+      captchaToken && lastMsg?.role === 'user' && lastMsg.text === text
+    );
+    const nextHistory = isCaptchaRetry
+      ? messages
+      : [
+          ...messages,
+          {
+            id: `usr_${Date.now()}`,
+            role: 'user' as const,
+            text,
+            timestamp: new Date().toISOString(),
+          },
+        ];
+
+    if (!isCaptchaRetry) {
+      setMessages(nextHistory);
+    }
     setChatLoading(true);
 
     try {
@@ -393,8 +412,11 @@ export function CustomerPage({
         message: text,
         history: nextHistory.map((m) => ({ role: m.role, text: m.text })),
         orderDraft,
+        captchaToken,
       });
 
+      setChatCaptchaRequired(false);
+      setPendingChatMessage(null);
       setOrderDraft(res.updatedDraft);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
@@ -405,6 +427,11 @@ export function CustomerPage({
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
+      if (err instanceof ChatApiError && err.captchaRequired) {
+        setChatCaptchaRequired(true);
+        setPendingChatMessage(text);
+        return;
+      }
       const fallbackMsg: ChatMessage = {
         id: `err_${Date.now()}`,
         role: 'assistant',
@@ -423,6 +450,9 @@ export function CustomerPage({
 
   const handleResetChat = () => {
     if (!bundle) return;
+    clearStoredChat(bundle.restaurant.id);
+    setChatCaptchaRequired(false);
+    setPendingChatMessage(null);
     setMessages([
       {
         id: `welcome_${Date.now()}`,
@@ -436,7 +466,14 @@ export function CustomerPage({
   const handleOrderConfirmed = (order: Order, whatsappUrl: string) => {
     setConfirmedOrderState({ order, whatsappUrl });
     setOrderDraft(EMPTY_DRAFT);
-    const nextHistory = [order, ...localOrderHistory].slice(0, 20);
+    // Strip PII (phone, address, notes) before persisting order history in localStorage
+    const sanitizedOrder: Order = {
+      ...order,
+      customerPhone: '',
+      customerAddress: '',
+      notes: '',
+    };
+    const nextHistory = [sanitizedOrder, ...localOrderHistory].slice(0, 20);
     setLocalOrderHistory(nextHistory);
     try {
       localStorage.setItem(ORDER_HISTORY_KEY, JSON.stringify(nextHistory));
@@ -557,7 +594,7 @@ export function CustomerPage({
       />
 
       {(!isOnline || isUsingCachedBundle) && (
-        <div className="bg-amber-600 text-white px-4 py-2 text-xs font-bold flex items-center justify-center gap-2 text-center">
+        <div className="bg-amber-700 text-white px-4 py-2 text-xs font-bold flex items-center justify-center gap-2 text-center">
           <WifiOff className="w-4 h-4 shrink-0" />
           <span>
             أنت تتصفح آخر نسخة محفوظة من القائمة (وضع القراءة بدون إنترنت) — إرسال الطلبات متوقف
@@ -654,6 +691,10 @@ export function CustomerPage({
             messages={messages}
             isLoading={chatLoading}
             isOnline={isOnline}
+            chatOptOut={chatOptOut}
+            captchaRequired={chatCaptchaRequired}
+            pendingMessage={pendingChatMessage}
+            onToggleChatOptOut={handleToggleChatOptOut}
             onSendMessage={handleSendMessage}
             onResetChat={handleResetChat}
             onQuickAddItem={handleQuickAddItem}
@@ -688,14 +729,14 @@ export function CustomerPage({
               onNavigateRoute('menu');
             }}
             onGoMenu={() => onNavigateRoute('menu')}
-            onTrackOrder={(ordNum) => onNavigateRoute('track', ordNum)}
+            onTrackOrder={(orderToken) => onNavigateRoute('track', orderToken)}
           />
         )}
 
         {route === 'track' && (
           <OrderTrackingView
             restaurant={restaurant}
-            initialOrderNumber={initialTrackOrderNumber || localOrderHistory[0]?.orderNumber || '1024'}
+            initialOrderToken={initialTrackOrderToken || localOrderHistory[0]?.orderToken}
           />
         )}
 
@@ -711,7 +752,7 @@ export function CustomerPage({
               setEditingCartLine(null);
               setSelectedProductModal(it);
             }}
-            onTrackOrder={(ordNum) => onNavigateRoute('track', ordNum)}
+            onTrackOrder={(orderToken) => onNavigateRoute('track', orderToken)}
             onReorder={handleReorder}
             onGoMenu={() => onNavigateRoute('menu')}
           />

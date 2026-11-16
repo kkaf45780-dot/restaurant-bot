@@ -7,9 +7,9 @@ import {
   MapPin,
   MessageCircle,
   Package,
-  Phone,
   RotateCcw,
   Search,
+  ShieldCheck,
   Star,
   Timer,
   User,
@@ -18,46 +18,47 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { ORDER_STATUS_META, ORDER_TIMELINE_STEPS } from '../../data/restaurant.ts';
-import {
-  lookupCustomerOrdersByPhone,
-  submitOrderRating,
-  trackOrderByNumber,
-} from '../../lib/api.ts';
+import { submitOrderRating, trackOrderByToken } from '../../lib/api.ts';
 import { resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { formatCurrency } from '../../lib/pricing.ts';
 import { supabase } from '../../lib/supabase.ts';
 import { buildWhatsAppInquiryUrl } from '../../lib/whatsapp.ts';
-import type { MenuItem, Order, Restaurant } from '../../types/restaurant.ts';
+import type {
+  MenuItem,
+  Order,
+  PublicOrderTracking,
+  Restaurant,
+} from '../../types/restaurant.ts';
 
 interface OrderTrackingViewProps {
   restaurant: Restaurant;
-  initialOrderNumber?: string;
+  initialOrderToken?: string;
 }
 
 export function OrderTrackingView({
   restaurant,
-  initialOrderNumber = '1024',
+  initialOrderToken = '',
 }: OrderTrackingViewProps) {
-  const [searchInput, setSearchInput] = useState(initialOrderNumber);
-  const [order, setOrder] = useState<Order | null>(null);
+  const [searchInput, setSearchInput] = useState(initialOrderToken);
+  const [tracking, setTracking] = useState<PublicOrderTracking | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchOrder = useCallback(
-    async (num: string, silent = false) => {
-      const clean = num.replace(/^#/, '').trim();
+    async (token: string, silent = false) => {
+      const clean = token.trim();
       if (!clean) return;
       if (!silent) {
         setLoading(true);
         setError(null);
       }
       try {
-        const res = await trackOrderByNumber(restaurant.id, clean);
-        setOrder(res.order);
+        const res = await trackOrderByToken(restaurant.id, clean);
+        setTracking(res.tracking);
         setError(null);
       } catch (err) {
         if (!silent) {
-          setOrder(null);
+          setTracking(null);
           setError(err instanceof Error ? err.message : 'لم يتم العثور على الطلب.');
         }
       } finally {
@@ -68,34 +69,40 @@ export function OrderTrackingView({
   );
 
   useEffect(() => {
-    if (initialOrderNumber) {
-      setSearchInput(initialOrderNumber);
-      fetchOrder(initialOrderNumber);
+    if (initialOrderToken) {
+      setSearchInput(initialOrderToken);
+      fetchOrder(initialOrderToken);
     }
-  }, [initialOrderNumber, fetchOrder]);
+  }, [initialOrderToken, fetchOrder]);
 
   // Live Supabase Realtime subscription + 5s polling fallback while tracking active order
   useEffect(() => {
-    if (!order || order.status === 'delivered' || order.status === 'cancelled') return;
+    if (
+      !tracking ||
+      tracking.status === 'delivered' ||
+      tracking.status === 'cancelled'
+    ) {
+      return;
+    }
 
     const timer = setInterval(() => {
-      fetchOrder(order.orderNumber, true);
+      fetchOrder(tracking.orderToken, true);
     }, 5000);
 
     let channel: ReturnType<NonNullable<typeof supabase>['channel']> | null = null;
     if (supabase) {
       channel = supabase
-        .channel(`order-track-${order.id}`)
+        .channel(`order-track-${tracking.orderToken}`)
         .on(
           'postgres_changes',
           {
             event: 'UPDATE',
             schema: 'public',
             table: 'orders',
-            filter: `id=eq.${order.id}`,
+            filter: `order_token=eq.${tracking.orderToken}`,
           },
           () => {
-            fetchOrder(order.orderNumber, true);
+            fetchOrder(tracking.orderToken, true);
           }
         )
         .subscribe();
@@ -107,7 +114,7 @@ export function OrderTrackingView({
         supabase.removeChannel(channel);
       }
     };
-  }, [order, fetchOrder]);
+  }, [tracking, fetchOrder]);
 
   const [selectedStars, setSelectedStars] = useState<number>(5);
   const [ratingComment, setRatingComment] = useState<string>('');
@@ -116,17 +123,17 @@ export function OrderTrackingView({
 
   const handleSubmitRating = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!order) return;
+    if (!tracking) return;
     setRatingSubmitting(true);
     setRatingError(null);
     try {
       const res = await submitOrderRating(
         restaurant.id,
-        order.orderNumber,
+        tracking.orderToken,
         selectedStars,
         ratingComment
       );
-      setOrder(res.order);
+      setTracking(res.tracking);
     } catch (err) {
       setRatingError(err instanceof Error ? err.message : 'تعذر حفظ التقييم.');
     } finally {
@@ -134,12 +141,12 @@ export function OrderTrackingView({
     }
   };
 
-  const statusMeta = order ? ORDER_STATUS_META[order.status] : null;
+  const statusMeta = tracking ? ORDER_STATUS_META[tracking.status] : null;
   const activeStepIdx = statusMeta ? statusMeta.stepIndex : 0;
   const supportWaUrl = buildWhatsAppInquiryUrl(
     restaurant.whatsappNumber,
-    order
-      ? `السلام عليكم، أستفسر عن حالة الطلب رقم #${order.orderNumber} في ${restaurant.name}`
+    tracking
+      ? `السلام عليكم، أستفسر عن حالة طلبي (${tracking.orderNumberMasked}) في ${restaurant.name}`
       : `السلام عليكم، أستفسر عن طلبي في ${restaurant.name}`
   );
 
@@ -149,10 +156,10 @@ export function OrderTrackingView({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
-            تتبع الطلبات
+            تتبع الطلبات الآمن
           </h1>
-          <p className="text-xs sm:text-sm text-[#5C6B63] dark:text-[#A3B8AE] mt-0.5">
-            أدخل رقم الطلب لمتابعة حالته لحظة بلحظة (جرب رقم الطلب التجريبي 1024 أو 1023)
+          <p className="text-xs sm:text-sm text-[#4A5850] dark:text-[#A3B8AE] mt-0.5">
+            أدخل رمز التتبع الخاص بالطلب لمتابعة حالته لحظة بلحظة مع حماية كاملة لبياناتك
           </p>
         </div>
 
@@ -163,25 +170,38 @@ export function OrderTrackingView({
           }}
           className="flex items-center gap-2 w-full sm:w-auto"
         >
-          <div className="relative flex-1 sm:w-64">
-            <Search className="w-4 h-4 text-[#5C6B63] absolute right-3.5 top-1/2 -translate-y-1/2" />
+          <div className="relative flex-1 sm:w-80">
+            <Search className="w-4 h-4 text-[#4A5850] absolute right-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
+              dir="ltr"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="رقم الطلب (مثال: 1024)"
-              className="w-full h-11 pr-10 pl-3 rounded-xl bg-white dark:bg-[#14201B] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm dark:text-[#ECF3EF] font-bold tabular-nums focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+              placeholder="رمز التتبع الآمن (orderToken)"
+              className="w-full h-11 pr-10 pl-3 rounded-xl bg-white dark:bg-[#14201B] border border-[#176B45]/20 dark:border-[#2A3F35] text-xs sm:text-sm dark:text-[#ECF3EF] font-mono text-left focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
             />
           </div>
           <button
             type="submit"
-            disabled={loading}
-            className="h-11 px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-xs font-extrabold cursor-pointer shrink-0"
+            disabled={loading || !searchInput.trim()}
+            className="h-11 px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:opacity-50 text-white text-xs font-extrabold cursor-pointer shrink-0"
           >
             {loading ? 'جاري البحث...' : 'تتبع'}
           </button>
         </form>
       </div>
+
+      {!tracking && !loading && !error && (
+        <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] p-8 text-center space-y-2.5">
+          <ShieldCheck className="w-10 h-10 text-[#104B34] mx-auto" />
+          <p className="font-extrabold text-[#18221D] dark:text-[#ECF3EF]">
+            أدخل رمز التتبع الخاص بطلبك لعرض الحالة المباشرة
+          </p>
+          <p className="text-xs text-[#4A5850] dark:text-[#A3B8AE]">
+            يظهر رمز ورابط التتبع الآمن فور تأكيد الطلب، أو يمكنك اختيار الطلب من صفحة "طلباتي".
+          </p>
+        </div>
+      )}
 
       {error && (
         <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-red-200 dark:border-red-800 p-6 text-center text-sm font-bold text-red-700 dark:text-red-300">
@@ -189,17 +209,17 @@ export function OrderTrackingView({
         </div>
       )}
 
-      {order && statusMeta && (
+      {tracking && statusMeta && (
         <div className="space-y-6">
-          {/* Top Order Number & Status Card matching Order_tracking_desktop_webpage_layout */}
+          {/* Top Order Number & Status Card */}
           <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] p-6 shadow-xs flex flex-wrap items-center justify-between gap-4">
             <div className="space-y-1">
               <p className="text-2xl sm:text-3xl font-extrabold text-[#18221D] dark:text-[#ECF3EF] tabular-nums">
-                طلب رقم #{order.orderNumber}
+                طلب {tracking.orderNumberMasked}
               </p>
-              <p className="text-xs text-[#5C6B63] dark:text-[#A3B8AE]">
+              <p className="text-xs text-[#4A5850] dark:text-[#A3B8AE]">
                 تم الإنشاء:{' '}
-                {new Date(order.createdAt).toLocaleString('ar-EG', {
+                {new Date(tracking.createdAt).toLocaleString('ar-EG', {
                   dateStyle: 'medium',
                   timeStyle: 'short',
                 })}
@@ -214,7 +234,7 @@ export function OrderTrackingView({
 
           {/* Visual Timeline Card */}
           <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] p-6 shadow-xs">
-            {order.status === 'cancelled' ? (
+            {tracking.status === 'cancelled' ? (
               <div className="py-4 flex items-center justify-center gap-3 text-red-700 font-extrabold">
                 <XCircle className="w-6 h-6" />
                 <span>تم إلغاء هذا الطلب. تواصل معنا عبر واتساب لأي استفسار.</span>
@@ -223,9 +243,9 @@ export function OrderTrackingView({
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-4">
                 {ORDER_TIMELINE_STEPS.map((stepKey, idx) => {
                   const meta = ORDER_STATUS_META[stepKey];
-                  const isCompleted = idx < activeStepIdx || order.status === 'delivered';
-                  const isCurrent = idx === activeStepIdx && order.status !== 'delivered';
-                  const historyMatch = order.statusHistory?.find((h) => h.status === stepKey);
+                  const isCompleted = idx < activeStepIdx || tracking.status === 'delivered';
+                  const isCurrent = idx === activeStepIdx && tracking.status !== 'delivered';
+                  const historyMatch = tracking.statusHistory?.find((h) => h.status === stepKey);
 
                   return (
                     <div
@@ -235,10 +255,10 @@ export function OrderTrackingView({
                       <div
                         className={`w-12 h-12 rounded-full flex items-center justify-center border-2 transition-colors ${
                           isCompleted
-                            ? 'bg-[#16A34A] border-[#16A34A] text-white'
+                            ? 'bg-[#15803D] border-[#15803D] text-white'
                             : isCurrent
-                              ? 'bg-[#F59E0B] border-[#F59E0B] text-white shadow-md'
-                              : 'bg-[#F3F4F2] border-[#E5E7EB] text-[#9CA3AF]'
+                              ? 'bg-[#B45309] border-[#B45309] text-white shadow-md'
+                              : 'bg-[#F3F4F2] border-[#D1D5DB] text-[#4B5563]'
                         }`}
                       >
                         {isCompleted ? (
@@ -254,13 +274,13 @@ export function OrderTrackingView({
                       <div>
                         <p
                           className={`text-xs font-extrabold ${
-                            isCompleted || isCurrent ? 'text-[#18221D]' : 'text-[#9CA3AF]'
+                            isCompleted || isCurrent ? 'text-[#18221D]' : 'text-[#4B5563]'
                           }`}
                         >
                           {meta.label}
                         </p>
                         {historyMatch && (
-                          <p className="text-[10px] text-[#5C6B63] tabular-nums mt-0.5">
+                          <p className="text-[10px] text-[#4A5850] tabular-nums mt-0.5">
                             {new Date(historyMatch.timestamp).toLocaleTimeString('ar-EG', {
                               hour: '2-digit',
                               minute: '2-digit',
@@ -275,50 +295,44 @@ export function OrderTrackingView({
             )}
           </div>
 
-          {/* 3-Column Details Grid matching Order_tracking_desktop_webpage_layout */}
+          {/* 3-Column Details Grid (PII-Masked for Security) */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-            {/* Column 1: Customer Details */}
+            {/* Column 1: Masked Customer & Fulfillment Info */}
             <div className="bg-white rounded-2xl border border-[#176B45]/10 p-6 shadow-xs space-y-3">
-              <h2 className="text-base font-extrabold text-[#104B34]">تفاصيل العميل</h2>
+              <h2 className="text-base font-extrabold text-[#104B34]">معلومات الطلب</h2>
               <div className="space-y-2.5 text-sm text-[#35443C]">
                 <p className="flex items-center gap-2 font-bold">
                   <User className="w-4 h-4 text-[#176B45]" />
-                  <span>{order.customerName}</span>
-                </p>
-                <p className="flex items-center gap-2 tabular-nums">
-                  <Phone className="w-4 h-4 text-[#176B45]" />
-                  <span dir="ltr">{order.customerPhone}</span>
+                  <span>العميل: {tracking.customerNameMasked}</span>
                 </p>
                 <p className="flex items-start gap-2 text-xs leading-relaxed">
                   <MapPin className="w-4 h-4 text-[#176B45] shrink-0 mt-0.5" />
                   <span>
-                    {order.deliveryZoneName ? `${order.deliveryZoneName} — ` : ''}
-                    {order.customerAddress}
+                    {tracking.fulfillmentType === 'pickup'
+                      ? `استلام من: ${tracking.branchName || restaurant.name}`
+                      : `منطقة التوصيل: ${tracking.deliveryZoneName || 'محددة'}`}
                   </span>
+                </p>
+                <p className="text-[11px] text-[#4A5850] flex items-center gap-1.5 pt-1">
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#15803D] shrink-0" />
+                  <span>البيانات الشخصية محمية ومخفية في صفحة التتبع العامة.</span>
                 </p>
               </div>
             </div>
 
-            {/* Column 2: Order Summary */}
-            <div className="bg-white rounded-2xl border border-[#176B45]/10 p-6 shadow-xs space-y-3">
-              <h2 className="text-base font-extrabold text-[#104B34]">ملخص الطلب</h2>
-              <div className="space-y-2 text-xs">
-                {order.items.map((it, idx) => (
-                  <div key={idx} className="flex justify-between gap-2 text-[#18221D]">
-                    <span className="font-bold">
-                      {it.quantity} × {it.name}
-                      {it.selectedSizeLabel ? ` (${it.selectedSizeLabel})` : ''}
-                    </span>
-                    <span className="font-bold tabular-nums">
-                      {formatCurrency(it.lineTotal, restaurant.systemSettings.currencyLabel)}
-                    </span>
-                  </div>
-                ))}
+            {/* Column 2: Masked Summary */}
+            <div className="bg-white rounded-2xl border border-[#176B45]/10 p-6 shadow-xs space-y-3 flex flex-col justify-between">
+              <div className="space-y-2">
+                <h2 className="text-base font-extrabold text-[#104B34]">ملخص التكلفة</h2>
+                <div className="flex justify-between text-xs text-[#35443C] pt-1">
+                  <span>عدد الأصناف</span>
+                  <span className="font-bold tabular-nums">{tracking.itemsCount} أصناف</span>
+                </div>
               </div>
               <div className="border-t border-[#176B45]/10 pt-3 flex justify-between items-center text-sm font-extrabold text-[#104B34]">
                 <span>المجموع النهائي:</span>
                 <span className="tabular-nums">
-                  {formatCurrency(order.total, restaurant.systemSettings.currencyLabel)}
+                  {formatCurrency(tracking.total, restaurant.systemSettings.currencyLabel)}
                 </span>
               </div>
             </div>
@@ -331,7 +345,7 @@ export function OrderTrackingView({
                 </h2>
                 <div className="flex items-center justify-center gap-2.5 text-2xl font-extrabold text-[#18221D] pt-1">
                   <Clock className="w-7 h-7 text-[#176B45]" />
-                  <span>{order.estimatedDeliveryText || '٣٠ - ٤٥ دقيقة'}</span>
+                  <span>{tracking.estimatedDeliveryText || '٣٠ - ٤٥ دقيقة'}</span>
                 </div>
               </div>
 
@@ -340,7 +354,7 @@ export function OrderTrackingView({
                   href={supportWaUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="w-full min-h-[46px] px-4 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-extrabold flex items-center justify-center gap-2 transition-colors"
+                  className="w-full min-h-[46px] px-4 rounded-xl bg-[#15803D] hover:bg-[#104B34] text-white text-sm font-extrabold flex items-center justify-center gap-2 transition-colors"
                 >
                   <MessageCircle className="w-4 h-4" />
                   <span>الدعم عبر واتساب</span>
@@ -348,26 +362,27 @@ export function OrderTrackingView({
               )}
             </div>
           </div>
+
           {/* Customer Rating Card when delivered */}
-          {order.status === 'delivered' && (
+          {tracking.status === 'delivered' && (
             <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#C5A46D]/40 dark:border-[#2A3F35] p-6 shadow-xs space-y-4">
-              {order.rating ? (
+              {tracking.rating ? (
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <h2 className="text-base font-extrabold text-[#104B34] dark:text-[#4ADE80]">
                       شكراً لتقييمك طلبك!
                     </h2>
-                    {order.ratingComment && (
+                    {tracking.ratingComment && (
                       <p className="text-sm text-[#35443C] dark:text-[#D1DFD8]">
-                        “{order.ratingComment}”
+                        “{tracking.ratingComment}”
                       </p>
                     )}
                   </div>
-                  <div className="flex items-center gap-1 text-[#C5A46D]">
+                  <div className="flex items-center gap-1 text-[#7C5A1E]">
                     {[1, 2, 3, 4, 5].map((n) => (
                       <Star
                         key={n}
-                        className={`w-6 h-6 ${n <= (order.rating ?? 0) ? 'fill-current' : 'opacity-30'}`}
+                        className={`w-6 h-6 ${n <= (tracking.rating ?? 0) ? 'fill-current' : 'opacity-30'}`}
                       />
                     ))}
                   </div>
@@ -379,7 +394,7 @@ export function OrderTrackingView({
                       <h2 className="text-base font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
                         قيّم تجربتك مع هذا الطلب
                       </h2>
-                      <p className="text-xs text-[#5C6B63] dark:text-[#A3B8AE]">
+                      <p className="text-xs text-[#4A5850] dark:text-[#A3B8AE]">
                         رأيك يساعدنا على تقديم جودة أفضل دائماً.
                       </p>
                     </div>
@@ -395,8 +410,8 @@ export function OrderTrackingView({
                           <Star
                             className={`w-7 h-7 ${
                               star <= selectedStars
-                                ? 'text-[#C5A46D] fill-current'
-                                : 'text-neutral-300 dark:text-neutral-600'
+                                ? 'text-[#B45309] fill-current'
+                                : 'text-neutral-400 dark:text-neutral-600'
                             }`}
                           />
                         </button>
@@ -405,7 +420,7 @@ export function OrderTrackingView({
                   </div>
 
                   {ratingError && (
-                    <p className="text-xs font-bold text-red-600">{ratingError}</p>
+                    <p className="text-xs font-bold text-red-700">{ratingError}</p>
                   )}
 
                   <div className="flex flex-col sm:flex-row gap-2.5">
@@ -442,7 +457,7 @@ interface OrderHistoryAndFavoritesProps {
   localOrderHistory: Order[];
   onToggleFavorite: (itemId: string) => void;
   onSelectItemDetails: (item: MenuItem) => void;
-  onTrackOrder: (orderNumber: string) => void;
+  onTrackOrder: (orderToken: string) => void;
   onReorder?: (order: Order) => void;
   onGoMenu: () => void;
 }
@@ -459,22 +474,13 @@ export function OrderHistoryAndFavoritesView({
   onReorder,
   onGoMenu,
 }: OrderHistoryAndFavoritesProps) {
-  const [phoneQuery, setPhoneQuery] = useState('');
-  const [remoteOrders, setRemoteOrders] = useState<Order[] | null>(null);
-  const [searching, setSearching] = useState(false);
+  const [tokenQuery, setTokenQuery] = useState('');
 
-  const handlePhoneLookup = async (e: React.FormEvent) => {
+  const handleTokenTrackSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phoneQuery.trim()) return;
-    setSearching(true);
-    try {
-      const res = await lookupCustomerOrdersByPhone(restaurant.id, phoneQuery.trim());
-      setRemoteOrders(res.orders);
-    } catch {
-      setRemoteOrders([]);
-    } finally {
-      setSearching(false);
-    }
+    const clean = tokenQuery.trim();
+    if (!clean) return;
+    onTrackOrder(clean);
   };
 
   if (mode === 'favorites') {
@@ -484,7 +490,7 @@ export function OrderHistoryAndFavoritesView({
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-extrabold text-[#104B34]">أطباقي المفضلة</h1>
-            <p className="text-xs text-[#5C6B63] mt-0.5">
+            <p className="text-xs text-[#4A5850] mt-0.5">
               قائمتك المحفوظة للطلب السريع في أي وقت
             </p>
           </div>
@@ -499,9 +505,9 @@ export function OrderHistoryAndFavoritesView({
 
         {favItems.length === 0 ? (
           <div className="bg-white rounded-3xl border border-[#176B45]/10 p-12 text-center space-y-3">
-            <Heart className="w-10 h-10 text-rose-300 mx-auto" />
+            <Heart className="w-10 h-10 text-rose-400 mx-auto" />
             <p className="font-extrabold text-[#18221D]">لا توجد أطباق في المفضلة بعد</p>
-            <p className="text-xs text-[#5C6B63]">
+            <p className="text-xs text-[#4A5850]">
               اضغط على أيقونة القلب على أي طبق في القائمة لحفظه هنا.
             </p>
           </div>
@@ -528,7 +534,7 @@ export function OrderHistoryAndFavoritesView({
                     type="button"
                     onClick={() => onToggleFavorite(item.id)}
                     aria-label="إزالة من المفضلة"
-                    className="w-9 h-9 rounded-full bg-rose-50 text-rose-500 flex items-center justify-center cursor-pointer"
+                    className="w-9 h-9 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center cursor-pointer"
                   >
                     <Heart className="w-4 h-4 fill-current" />
                   </button>
@@ -548,43 +554,41 @@ export function OrderHistoryAndFavoritesView({
     );
   }
 
-  const displayedOrders = remoteOrders ?? localOrderHistory;
-
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-extrabold text-[#104B34]">طلباتي السابقة</h1>
-          <p className="text-xs text-[#5C6B63] mt-0.5">
-            اعرض طلباتك المسجلة أو ابحث برقم هاتفك
+          <p className="text-xs text-[#4A5850] mt-0.5">
+            اعرض طلباتك المحفوظة على هذا الجهاز أو تابع برمز التتبع الآمن
           </p>
         </div>
 
-        <form onSubmit={handlePhoneLookup} className="flex items-center gap-2">
+        <form onSubmit={handleTokenTrackSubmit} className="flex items-center gap-2">
           <input
-            type="tel"
+            type="text"
             dir="ltr"
-            value={phoneQuery}
-            onChange={(e) => setPhoneQuery(e.target.value)}
-            placeholder="بحث برقم الهاتف (010...)"
-            className="h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm text-right tabular-nums"
+            value={tokenQuery}
+            onChange={(e) => setTokenQuery(e.target.value)}
+            placeholder="متابعة برمز التتبع الآمن (orderToken)"
+            className="h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-xs sm:text-sm text-left font-mono"
           />
           <button
             type="submit"
-            disabled={searching}
-            className="h-11 px-4 rounded-xl bg-[#104B34] text-white text-xs font-bold cursor-pointer"
+            disabled={!tokenQuery.trim()}
+            className="h-11 px-4 rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:opacity-50 text-white text-xs font-bold cursor-pointer shrink-0"
           >
-            {searching ? 'جاري البحث...' : 'بحث'}
+            تتبع
           </button>
         </form>
       </div>
 
-      {displayedOrders.length === 0 ? (
+      {localOrderHistory.length === 0 ? (
         <div className="bg-white rounded-3xl border border-[#176B45]/10 p-12 text-center space-y-3">
-          <History className="w-10 h-10 text-[#176B45]/40 mx-auto" />
-          <p className="font-extrabold text-[#18221D]">لا توجد طلبات مسجلة حتى الآن</p>
-          <p className="text-xs text-[#5C6B63]">
-            يمكنك تجربة البحث برقم الهاتف مثل 01012345678 أو تقديم طلب جديد من القائمة.
+          <History className="w-10 h-10 text-[#176B45]/50 mx-auto" />
+          <p className="font-extrabold text-[#18221D]">لا توجد طلبات مسجلة على هذا الجهاز</p>
+          <p className="text-xs text-[#4A5850]">
+            يمكنك متابعة أي طلب بإدخال رمز التتبع الآمن (orderToken) بالأعلى أو بدء طلب جديد من القائمة.
           </p>
           <button
             type="button"
@@ -597,7 +601,7 @@ export function OrderHistoryAndFavoritesView({
         </div>
       ) : (
         <div className="space-y-3">
-          {displayedOrders.map((ord) => {
+          {localOrderHistory.map((ord) => {
             const meta = ORDER_STATUS_META[ord.status];
             return (
               <div
@@ -615,16 +619,16 @@ export function OrderHistoryAndFavoritesView({
                       {meta.label}
                     </span>
                     {ord.rating && (
-                      <span className="inline-flex items-center gap-1 text-xs font-bold text-[#C5A46D]">
+                      <span className="inline-flex items-center gap-1 text-xs font-bold text-[#7C5A1E]">
                         <Star className="w-3.5 h-3.5 fill-current" />
                         <span>{ord.rating}/5</span>
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-[#5C6B63] dark:text-[#A3B8AE]">
+                  <p className="text-xs text-[#4A5850] dark:text-[#A3B8AE]">
                     {ord.items.map((i) => `${i.quantity}× ${i.name}`).join('، ')}
                   </p>
-                  <p className="text-[11px] text-[#7A8880]">
+                  <p className="text-[11px] text-[#4A5850] dark:text-[#A3B8AE]">
                     {new Date(ord.createdAt).toLocaleString('ar-EG', {
                       dateStyle: 'medium',
                       timeStyle: 'short',
@@ -648,7 +652,7 @@ export function OrderHistoryAndFavoritesView({
                   )}
                   <button
                     type="button"
-                    onClick={() => onTrackOrder(ord.orderNumber)}
+                    onClick={() => onTrackOrder(ord.orderToken)}
                     className="min-h-[40px] px-4 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] hover:bg-[#EFE9DC] text-[#104B34] dark:text-[#ECF3EF] text-xs font-extrabold cursor-pointer"
                   >
                     تتبع الطلب

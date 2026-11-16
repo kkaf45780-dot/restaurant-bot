@@ -80,7 +80,7 @@ export function HomepageView({
           {/* Right Column in RTL: Hero Headline & CTAs */}
           <div className="lg:col-span-6 space-y-6 text-right">
             <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white dark:bg-[#14201B] border border-[#C5A46D]/40 text-xs font-bold text-[#104B34] dark:text-[#4ADE80]">
-              <Sparkles className="w-3.5 h-3.5 text-[#C5A46D]" />
+              <Sparkles className="w-3.5 h-3.5 text-[#7C5A1E] dark:text-[#C5A46D]" />
               <span>{restaurant.name} · استقبال ذكي على مدار ساعات العمل</span>
             </div>
 
@@ -386,7 +386,7 @@ export function HomepageView({
                   href={whatsappUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="w-full min-h-[44px] px-4 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-bold flex items-center justify-center gap-2 transition-colors"
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-[#15803D] hover:bg-[#104B34] text-white text-sm font-bold flex items-center justify-center gap-2 transition-colors"
                 >
                   <MessageCircle className="w-4 h-4" />
                   <span>تواصل عبر واتساب</span>

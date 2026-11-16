@@ -1,6 +1,8 @@
 -- =====================================================================
--- موظف المطعم — مخطط قاعدة بيانات Supabase الكامل (الإصدار الإنتاجي)
+-- موظف المطعم — مخطط قاعدة بيانات Supabase الكامل (الإصدار الإنتاجي الآمن)
 -- =====================================================================
+
+create extension if not exists pgcrypto;
 
 -- 1. جدول المطاعم
 create table if not exists public.restaurants (
@@ -26,6 +28,7 @@ create table if not exists public.restaurant_admins (
   restaurant_id text not null references public.restaurants(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
   role text not null default 'owner',
+  must_change_password boolean not null default false,
   created_at timestamptz not null default now(),
   unique(restaurant_id, user_id)
 );
@@ -99,10 +102,11 @@ create table if not exists public.coupons (
   unique(restaurant_id, code)
 );
 
--- 8. جدول الطلبات
+-- 8. جدول الطلبات (يتضمن order_token عشوائي غير قابل للتخمين لمنع IDOR)
 create table if not exists public.orders (
   id text primary key,
   order_number text not null,
+  order_token uuid unique not null default gen_random_uuid(),
   restaurant_id text not null references public.restaurants(id) on delete cascade,
   customer_name text not null,
   customer_phone text not null,
@@ -134,10 +138,30 @@ create table if not exists public.orders (
 );
 
 create index if not exists idx_orders_rest_number on public.orders (restaurant_id, order_number);
-create index if not exists idx_orders_rest_phone on public.orders (restaurant_id, customer_phone);
+create index if not exists idx_orders_token on public.orders (order_token);
+create index if not exists idx_orders_rest_idempotency on public.orders (restaurant_id, idempotency_key);
 create index if not exists idx_orders_rest_created on public.orders (restaurant_id, created_at desc);
 
--- 9. جدول حركات المخزون
+-- 9. جدول بنود الطلبات العلائقي (Order Items)
+create table if not exists public.order_items (
+  id text primary key default gen_random_uuid()::text,
+  order_id text not null references public.orders(id) on delete cascade,
+  restaurant_id text not null references public.restaurants(id) on delete cascade,
+  item_id text not null,
+  item_name text not null,
+  unit_price numeric(10, 2) not null,
+  quantity integer not null check (quantity > 0),
+  line_total numeric(10, 2) not null,
+  selected_size_id text,
+  selected_size_label text,
+  selected_extras jsonb not null default '[]'::jsonb,
+  item_notes text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_order_items_order_id on public.order_items (order_id);
+
+-- 10. جدول حركات المخزون
 create table if not exists public.inventory_movements (
   id text primary key,
   restaurant_id text not null references public.restaurants(id) on delete cascade,
@@ -151,7 +175,7 @@ create table if not exists public.inventory_movements (
   created_at timestamptz not null default now()
 );
 
--- 10. جدول الموظفين والصلاحيات
+-- 11. جدول الموظفين والصلاحيات + بيانات الاعتماد المشفرة
 create table if not exists public.employees (
   id text primary key,
   restaurant_id text not null references public.restaurants(id) on delete cascade,
@@ -159,11 +183,14 @@ create table if not exists public.employees (
   email text not null,
   phone text not null default '',
   role text not null default 'cashier',
+  password_hash text,
+  must_change_password boolean not null default true,
   is_active boolean not null default true,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique(restaurant_id, email)
 );
 
--- 11. جدول سجل النشاط
+-- 12. جدول سجل النشاط
 create table if not exists public.activity_logs (
   id text primary key,
   restaurant_id text not null references public.restaurants(id) on delete cascade,
@@ -173,7 +200,7 @@ create table if not exists public.activity_logs (
   created_at timestamptz not null default now()
 );
 
--- 12. جدول الإشعارات
+-- 13. جدول الإشعارات
 create table if not exists public.notifications (
   id text primary key,
   restaurant_id text not null references public.restaurants(id) on delete cascade,
@@ -184,7 +211,7 @@ create table if not exists public.notifications (
   created_at timestamptz not null default now()
 );
 
--- 13. جدول سجلات المساعد الذكي
+-- 14. جدول سجلات المساعد الذكي (بدون PII)
 create table if not exists public.ai_logs (
   id text primary key,
   restaurant_id text not null references public.restaurants(id) on delete cascade,
@@ -196,7 +223,22 @@ create table if not exists public.ai_logs (
   error_message text
 );
 
+-- 15. دالة ذرية لزيادة عداد الكوبون بأمان
+create or replace function public.increment_coupon_usage(
+  p_restaurant_id text,
+  p_code text
+) returns void language plpgsql security definer as $$
+begin
+  update public.coupons
+  set used_count = used_count + 1
+  where restaurant_id = p_restaurant_id
+    and upper(code) = upper(p_code);
+end;
+$$;
+
+-- =====================================================================
 -- تفعيل سياسات الحماية (RLS)
+-- =====================================================================
 alter table public.restaurants enable row level security;
 alter table public.restaurant_admins enable row level security;
 alter table public.branches enable row level security;
@@ -205,23 +247,35 @@ alter table public.menu_items enable row level security;
 alter table public.delivery_zones enable row level security;
 alter table public.coupons enable row level security;
 alter table public.orders enable row level security;
+alter table public.order_items enable row level security;
 alter table public.inventory_movements enable row level security;
 alter table public.employees enable row level security;
 alter table public.activity_logs enable row level security;
 alter table public.notifications enable row level security;
 alter table public.ai_logs enable row level security;
 
--- القراءة العامة للبيانات التشغيلية فقط
+-- القراءة العامة للمنيو والبيانات التشغيلية فقط (ممنوع قراءة orders أو employees أو logs للعامة)
+drop policy if exists "Public read restaurants" on public.restaurants;
 create policy "Public read restaurants" on public.restaurants for select using (true);
+
+drop policy if exists "Public read branches" on public.branches;
 create policy "Public read branches" on public.branches for select using (true);
+
+drop policy if exists "Public read categories" on public.menu_categories;
 create policy "Public read categories" on public.menu_categories for select using (true);
+
+drop policy if exists "Public read items" on public.menu_items;
 create policy "Public read items" on public.menu_items for select using (true);
-create policy "Public read delivery zones" on public.delivery_zones for select using (true);
+
+drop policy if exists "Public read delivery zones" on public.delivery_zones;
+create policy "Public read delivery zones" on public.delivery_zones for select using (is_active = true);
+
+drop policy if exists "Public read active coupons" on public.coupons;
 create policy "Public read active coupons" on public.coupons for select using (is_active = true);
 
--- إنشاء الطلبات ومتابعتها عبر API
-create policy "Public insert orders" on public.orders for insert with check (true);
-create policy "Public read orders by order number" on public.orders for select using (true);
+-- إزالة سياسات القراءة المفتوحة على الطلبات (تُدار عبر Worker / Service Role فقط مع التحقق من order_token)
+drop policy if exists "Public read orders by order number" on public.orders;
+drop policy if exists "Public insert orders" on public.orders;
 
 -- دالة التحقق من صلاحية المدير
 create or replace function public.is_restaurant_admin(target_restaurant_id text)
@@ -233,38 +287,67 @@ returns boolean language sql security definer as $$
   );
 $$;
 
+drop policy if exists "Admins manage restaurants" on public.restaurants;
 create policy "Admins manage restaurants" on public.restaurants
   for all using (public.is_restaurant_admin(id)) with check (public.is_restaurant_admin(id));
+
+drop policy if exists "Admins manage branches" on public.branches;
 create policy "Admins manage branches" on public.branches
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage categories" on public.menu_categories;
 create policy "Admins manage categories" on public.menu_categories
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage items" on public.menu_items;
 create policy "Admins manage items" on public.menu_items
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage delivery zones" on public.delivery_zones;
 create policy "Admins manage delivery zones" on public.delivery_zones
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage coupons" on public.coupons;
 create policy "Admins manage coupons" on public.coupons
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage orders" on public.orders;
 create policy "Admins manage orders" on public.orders
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage order_items" on public.order_items;
+create policy "Admins manage order_items" on public.order_items
+  for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage inventory" on public.inventory_movements;
 create policy "Admins manage inventory" on public.inventory_movements
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage employees" on public.employees;
 create policy "Admins manage employees" on public.employees
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins read activity logs" on public.activity_logs;
 create policy "Admins read activity logs" on public.activity_logs
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins manage notifications" on public.notifications;
 create policy "Admins manage notifications" on public.notifications
   for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
+drop policy if exists "Admins read ai logs" on public.ai_logs;
 create policy "Admins read ai logs" on public.ai_logs
   for select using (public.is_restaurant_admin(restaurant_id));
 
--- إنشاء حاوية تخزين الصور في Supabase Storage (restaurant-assets)
+-- حاوية تخزين الصور في Supabase Storage
 insert into storage.buckets (id, name, public)
 values ('restaurant-assets', 'restaurant-assets', true)
 on conflict (id) do nothing;
 
+drop policy if exists "Public read restaurant assets" on storage.objects;
 create policy "Public read restaurant assets" on storage.objects
   for select using (bucket_id = 'restaurant-assets');
 
+drop policy if exists "Authenticated upload restaurant assets" on storage.objects;
 create policy "Authenticated upload restaurant assets" on storage.objects
   for insert with check (bucket_id = 'restaurant-assets' and auth.role() = 'authenticated');

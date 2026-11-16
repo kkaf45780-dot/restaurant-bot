@@ -1,4 +1,36 @@
-import { createClient } from '@supabase/supabase-js';
+import { handleAdminLogin } from '../worker/routes/admin-login.ts';
+import { handlePublicChat } from '../worker/routes/chat.ts';
+import {
+  getAdminServiceConfigStatus,
+  handlePublicConfigStatus,
+} from '../worker/routes/config-status.ts';
+import {
+  handlePublicOrderTrack,
+  isValidOrderTokenFormat,
+  toPublicOrderTracking,
+} from '../worker/routes/orders-track.ts';
+import {
+  authenticateBearerRequest,
+  getEffectiveSessionSecret,
+  hashPasswordBcrypt,
+  isStrongAdminPassword,
+  signAdminJwt,
+  verifyPasswordAgainstHash,
+} from '../worker/auth.ts';
+import {
+  checkCouponRateLimit,
+  checkFixedWindowRateLimit,
+  checkTrackRateLimit,
+  getClientIp,
+  rateLimitResponse,
+} from '../worker/middleware/rate-limit.ts';
+import {
+  applySecurityHeaders,
+  handleCorsPreflight,
+  isKnownSpaRoute,
+  isStaticAssetPath,
+  safeErrorResponse,
+} from '../worker/middleware/security.ts';
 import { DEFAULT_RESTAURANT_ID } from './data/restaurant.ts';
 import { evaluateRestaurantHours } from './lib/hours.ts';
 import {
@@ -22,10 +54,10 @@ import {
   deleteMenuItem,
   findEmployeeByEmail,
   findOrderByIdempotencyKey,
-  findOrderByNumberOrId,
-  findOrdersByPhone,
+  findOrderByToken,
   getRestaurantBundle,
   incrementCouponUsage,
+  isOwnerPasswordOverridden,
   isSupabaseBackendActive,
   listActivityLogs,
   listAiLogs,
@@ -35,7 +67,7 @@ import {
   listNotifications,
   listOrders,
   markNotificationsRead,
-  rateOrder,
+  rateOrderByToken,
   reorderMenuItems,
   setAdminPassword,
   updateOrderStatus,
@@ -49,7 +81,6 @@ import {
   upsertMenuItem,
   verifyAdminPassword,
 } from './server/edgeStore.ts';
-import { runReceptionistChatCore } from './server/geminiCore.ts';
 import {
   ALLOWED_AI_MODELS,
   type Coupon,
@@ -63,174 +94,12 @@ import {
   type OrderDraftItem,
   type OrderStatus,
   type RestaurantBranch,
-  type ServiceConfigStatus,
 } from './types/restaurant.ts';
 
 const VALID_ROLES: EmployeeRole[] = ['owner', 'manager', 'cashier', 'kitchen'];
-const DEFAULT_SESSION_SECRET = 'meshweyat-elhara-local-session-secret-2026';
 
-// In-memory sliding-window rate limiters per worker isolate
-const chatRateMap = new Map<string, number[]>();
-const restaurantRateMap = new Map<string, number[]>();
-
-function checkSlidingLimit(map: Map<string, number[]>, key: string, maxRequests: number): boolean {
-  const now = Date.now();
-  const windowMs = 60_000;
-  const recent = (map.get(key) ?? []).filter((ts) => now - ts < windowMs);
-  if (recent.length >= maxRequests) return false;
-  recent.push(now);
-  map.set(key, recent);
-  return true;
-}
-
-function checkChatRateLimit(ip: string): boolean {
-  return checkSlidingLimit(chatRateMap, ip, 15);
-}
-
-function checkRestaurantRateLimit(ip: string): boolean {
-  return checkSlidingLimit(restaurantRateMap, ip, 60);
-}
-
-function withSecurityHeaders(response: Response): Response {
-  const headers = new Headers(response.headers);
-  headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  headers.set('X-Frame-Options', 'DENY');
-  headers.set(
-    'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; frame-ancestors 'none'"
-  );
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
-function toBase64Url(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function fromBase64Url(str: string): Uint8Array {
-  const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  const pad = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4));
-  const binary = atob(base64 + pad);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-async function hmacSign(secret: string, data: string): Promise<string> {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const sigBuffer = await crypto.subtle.sign('HMAC', key, enc.encode(data));
-  return toBase64Url(new Uint8Array(sigBuffer));
-}
-
-async function signAdminToken(
-  secret: string,
-  email: string,
-  role: EmployeeRole = 'owner'
-): Promise<string> {
-  const payloadJson = JSON.stringify({
-    email,
-    role,
-    exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
-  });
-  const payload = toBase64Url(new TextEncoder().encode(payloadJson));
-  const sig = await hmacSign(secret, payload);
-  return `local.${payload}.${sig}`;
-}
-
-async function verifyLocalAdminToken(
-  secret: string,
-  token: string
-): Promise<{ email: string; role: EmployeeRole } | null> {
-  if (!token.startsWith('local.')) return null;
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  const [, payload, sig] = parts;
-  const expectedSig = await hmacSign(secret, payload);
-  if (sig !== expectedSig) return null;
-  try {
-    const decodedStr = new TextDecoder().decode(fromBase64Url(payload));
-    const decoded = JSON.parse(decodedStr) as {
-      email: string;
-      role?: EmployeeRole;
-      exp: number;
-    };
-    if (decoded.exp < Date.now()) return null;
-    const role: EmployeeRole =
-      decoded.role && VALID_ROLES.includes(decoded.role) ? decoded.role : 'owner';
-    return { email: decoded.email, role };
-  } catch {
-    return null;
-  }
-}
-
-async function resolveRoleForEmail(env: EdgeEnv, email: string): Promise<EmployeeRole> {
-  const expectedOwner = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-  if (email.trim().toLowerCase() === expectedOwner) return 'owner';
-  const emp = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, email);
-  return emp?.role ?? 'owner';
-}
-
-function getSessionSecret(env: EdgeEnv): string {
-  return env.ADMIN_SESSION_SECRET || DEFAULT_SESSION_SECRET;
-}
-
-async function verifyAdminRequest(
-  request: Request,
-  env: EdgeEnv
-): Promise<{ email: string; role: EmployeeRole } | Response> {
-  const authHeader = request.headers.get('authorization') || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-
-  if (!token) {
-    return Response.json(
-      { error: 'غير مصرح لك بالوصول. يُرجى تسجيل الدخول كمدير أولاً.' },
-      { status: 401 }
-    );
-  }
-
-  const supabaseUrl = env.VITE_SUPABASE_URL || env.SUPABASE_URL;
-  const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY || env.VITE_SUPABASE_ANON_KEY;
-
-  if (supabaseUrl && supabaseKey && !token.startsWith('local.')) {
-    try {
-      const sb = createClient(supabaseUrl, supabaseKey);
-      const { data, error } = await sb.auth.getUser(token);
-      if (!error && data.user) {
-        const userEmail = data.user.email ?? 'admin';
-        const role = await resolveRoleForEmail(env, userEmail);
-        return { email: userEmail, role };
-      }
-    } catch {
-      // Fall through
-    }
-  }
-
-  const localAdmin = await verifyLocalAdminToken(getSessionSecret(env), token);
-  if (localAdmin) {
-    return localAdmin;
-  }
-
-  return Response.json(
-    { error: 'انتهت جلسة المدير أو بيانات الدخول غير صالحة.' },
-    { status: 401 }
-  );
+function getKvStore(env: EdgeEnv) {
+  return env.RATE_LIMIT_KV || env.RESTAURANT_DB;
 }
 
 function checkPermission(role: EmployeeRole, ...allowed: AdminTabPermission[]): Response | null {
@@ -241,23 +110,6 @@ function checkPermission(role: EmployeeRole, ...allowed: AdminTabPermission[]): 
   );
 }
 
-function getServiceConfigStatus(env: EdgeEnv): ServiceConfigStatus {
-  const geminiConfigured = Boolean(
-    env.GEMINI_API_KEY && env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'
-  );
-  const supabaseUrl = env.VITE_SUPABASE_URL || env.SUPABASE_URL;
-  const supabaseAnon = env.VITE_SUPABASE_ANON_KEY;
-  const supabaseConfigured = Boolean(supabaseUrl && supabaseAnon);
-
-  return {
-    geminiConfigured,
-    supabaseConfigured,
-    storageMode: isSupabaseBackendActive(env) ? 'supabase' : 'local',
-    authMode: supabaseConfigured ? 'supabase' : 'local',
-    demoAdminEmail: env.ADMIN_EMAIL || 'admin@hara-grill.eg',
-  };
-}
-
 async function readJsonBody<T = Record<string, unknown>>(request: Request): Promise<T> {
   try {
     return (await request.json()) as T;
@@ -266,17 +118,40 @@ async function readJsonBody<T = Record<string, unknown>>(request: Request): Prom
   }
 }
 
+function sanitizeCsvCell(val: unknown): string {
+  const str = String(val ?? '');
+  const formulaSafe = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  return `"${formulaSafe.replace(/"/g, '""')}"`;
+}
+
+async function resolveRoleForEmail(
+  env: EdgeEnv,
+  email: string
+): Promise<{ role: EmployeeRole; mustChangePassword: boolean } | null> {
+  const clean = email.trim().toLowerCase();
+  const expectedOwner = (env.ADMIN_EMAIL || '').trim().toLowerCase();
+  if (expectedOwner && clean === expectedOwner) {
+    const overridden = await isOwnerPasswordOverridden(env);
+    return { role: 'owner', mustChangePassword: !overridden };
+  }
+  const emp = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, clean);
+  if (!emp) return null;
+  return { role: emp.role, mustChangePassword: Boolean(emp.mustChangePassword) };
+}
+
 async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
   const method = request.method.toUpperCase();
+  const clientIp = getClientIp(request.headers);
+  const kv = getKvStore(env);
 
   if (method === 'GET' && pathname === '/api/health') {
     return Response.json({ ok: true, service: 'moazzaf-almatam', runtime: 'cloudflare-workers' });
   }
 
   if (method === 'GET' && pathname === '/api/config/status') {
-    return Response.json(getServiceConfigStatus(env));
+    return Response.json(handlePublicConfigStatus(env));
   }
 
   if (
@@ -284,14 +159,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
     (pathname === '/api/restaurant' || pathname.startsWith('/api/restaurant/'))
   ) {
     try {
-      const clientIp =
-        request.headers.get('cf-connecting-ip') ||
-        request.headers.get('x-forwarded-for') ||
-        'unknown';
-      if (!checkRestaurantRateLimit(clientIp)) {
-        return Response.json(
-          { error: 'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.' },
-          { status: 429 }
+      const rate = await checkFixedWindowRateLimit({
+        kv,
+        prefix: 'restaurant',
+        key: clientIp,
+        limit: 60,
+        windowSeconds: 60,
+      });
+      if (!rate.allowed) {
+        return rateLimitResponse(
+          rate.retryAfterSeconds,
+          'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.'
         );
       }
       const slug = pathname.slice('/api/restaurant'.length).replace(/^\//, '');
@@ -300,16 +178,23 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       const hoursStatus = evaluateRestaurantHours(bundle.restaurant);
       return Response.json({ bundle, hoursStatus });
     } catch (err) {
-      console.error('Error loading restaurant:', err);
-      return Response.json(
-        { error: 'تعذر تحميل بيانات المطعم حالياً، يُرجى المحاولة لاحقاً.' },
-        { status: 500 }
+      return safeErrorResponse(
+        500,
+        'تعذر تحميل بيانات المطعم حالياً، يُرجى المحاولة لاحقاً.',
+        err
       );
     }
   }
 
   if (method === 'POST' && pathname === '/api/coupons/validate') {
     try {
+      const rate = await checkCouponRateLimit({ kv, ip: clientIp });
+      if (!rate.allowed) {
+        return rateLimitResponse(
+          rate.retryAfterSeconds,
+          'تم إرسال محاولات كثيرة للتحقق من الكوبون، يُرجى الانتظار دقيقة.'
+        );
+      }
       const body = await readJsonBody<{
         restaurantId?: string;
         code?: string;
@@ -348,38 +233,48 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         discountAmount: calc.discountAmount,
         totals: calc,
       });
-    } catch {
-      return Response.json({ error: 'تعذر التحقق من كود الخصم حالياً.' }, { status: 500 });
+    } catch (err) {
+      return safeErrorResponse(500, 'تعذر التحقق من كود الخصم حالياً.', err);
     }
   }
 
   if (method === 'GET' && pathname === '/api/orders/track') {
     try {
       const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
-      const orderNumber = (url.searchParams.get('orderNumber') || '').trim();
-      const phone = (url.searchParams.get('phone') || '').trim();
-
-      if (orderNumber) {
-        const order = await findOrderByNumberOrId(env, restaurantId, orderNumber);
-        if (!order) {
-          return Response.json({ error: 'لم يتم العثور على طلب بهذا الرقم.' }, { status: 404 });
-        }
-        return Response.json({ order });
-      }
-      if (phone) {
-        const orders = await findOrdersByPhone(env, restaurantId, phone);
-        return Response.json({ orders });
-      }
-      return Response.json({ error: 'يُرجى إدخال رقم الطلب أو رقم الهاتف.' }, { status: 400 });
-    } catch {
-      return Response.json({ error: 'تعذر البحث عن الطلب حالياً.' }, { status: 500 });
+      const token = (
+        url.searchParams.get('token') ||
+        url.searchParams.get('orderToken') ||
+        ''
+      ).trim();
+      const hasLegacyParam = Boolean(
+        url.searchParams.get('orderNumber') || url.searchParams.get('phone')
+      );
+      return await handlePublicOrderTrack({
+        kv,
+        ip: clientIp,
+        token,
+        hasLegacyParam,
+        findByToken: (t) => findOrderByToken(env, restaurantId, t),
+      });
+    } catch (err) {
+      return safeErrorResponse(500, 'تعذر البحث عن الطلب حالياً.', err);
     }
   }
 
   const rateMatch = pathname.match(/^\/api\/orders\/([^/]+)\/rate$/);
   if (method === 'POST' && rateMatch) {
     try {
-      const orderNumber = decodeURIComponent(rateMatch[1]);
+      const rate = await checkTrackRateLimit({ kv, ip: clientIp });
+      if (!rate.allowed) {
+        return rateLimitResponse(
+          rate.retryAfterSeconds,
+          'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.'
+        );
+      }
+      const orderToken = decodeURIComponent(rateMatch[1]);
+      if (!isValidOrderTokenFormat(orderToken)) {
+        return Response.json({ error: 'رمز التتبع غير صالح.' }, { status: 400 });
+      }
       const body = await readJsonBody<{
         restaurantId?: string;
         rating?: number;
@@ -390,17 +285,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (!Number.isFinite(numRating) || numRating < 1 || numRating > 5) {
         return Response.json({ error: 'يُرجى اختيار تقييم من 1 إلى 5 نجوم.' }, { status: 400 });
       }
-      const updated = await rateOrder(
+      const updated = await rateOrderByToken(
         env,
         String(restaurantId),
-        orderNumber,
+        orderToken,
         numRating,
         String(comment || '')
       );
       if (!updated) {
         return Response.json({ error: 'لم يتم العثور على الطلب.' }, { status: 404 });
       }
-      return Response.json({ order: updated });
+      return Response.json({ tracking: toPublicOrderTracking(updated) });
     } catch (err) {
       return Response.json(
         { error: err instanceof Error ? err.message : 'تعذر تسجيل التقييم حالياً.' },
@@ -411,24 +306,11 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
   if (method === 'POST' && pathname === '/api/chat') {
     try {
-      const clientIp =
-        request.headers.get('cf-connecting-ip') ||
-        request.headers.get('x-forwarded-for') ||
-        'unknown';
-      if (!checkChatRateLimit(clientIp)) {
-        return Response.json(
-          {
-            error:
-              'تم إرسال رسائل كثيرة في وقت قصير. يُرجى الانتظار دقيقة ثم المحاولة مرة أخرى.',
-          },
-          { status: 429 }
-        );
-      }
-
       const body = await readJsonBody<{
         restaurantId?: string;
-        message?: string;
-        history?: Array<{ role: 'user' | 'assistant'; text: string }>;
+        message?: unknown;
+        history?: unknown;
+        captchaToken?: string;
         orderDraft?: {
           items: OrderDraftItem[];
           fulfillmentType?: FulfillmentType;
@@ -442,46 +324,27 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         };
       }>(request);
 
-      const {
-        restaurantId = DEFAULT_RESTAURANT_ID,
-        message,
-        history = [],
-        orderDraft = {
-          items: [],
-          fulfillmentType: 'delivery',
-          deliveryZoneId: '',
-          customerName: '',
-          customerPhone: '',
-          customerAddress: '',
-          notes: '',
-        },
-      } = body;
+      const captchaToken =
+        body.captchaToken || request.headers.get('x-captcha-token') || undefined;
+      const restaurantId = body.restaurantId || DEFAULT_RESTAURANT_ID;
 
-      if (!message || typeof message !== 'string' || !message.trim()) {
-        return Response.json({ error: 'يُرجى كتابة رسالة قبل الإرسال.' }, { status: 400 });
-      }
-
-      const bundle = await getRestaurantBundle(env, restaurantId);
-      const result = await runReceptionistChatCore({
-        bundle,
-        userMessage: message.trim(),
-        history: Array.isArray(history) ? history : [],
-        currentDraft: {
-          fulfillmentType: 'delivery',
-          ...orderDraft,
-        },
-        apiKey: env.GEMINI_API_KEY,
+      return await handlePublicChat({
+        kv,
+        ip: clientIp,
+        captchaToken,
+        turnstileSecretKey: env.TURNSTILE_SECRET_KEY,
+        geminiApiKey: env.GEMINI_API_KEY,
+        message: body.message,
+        history: body.history,
+        orderDraft: body.orderDraft,
+        loadBundle: () => getRestaurantBundle(env, restaurantId),
         onAiLog: (entry) => appendAiLog(env, entry),
       });
-
-      return Response.json(result);
     } catch (err) {
-      console.error('Chat endpoint error:', err);
-      return Response.json(
-        {
-          error: 'حدث خطأ أثناء معالجة الرسالة، يمكنك التواصل معنا مباشرة عبر واتساب.',
-        },
-        { status: 500 }
+      return safeErrorResponse(
+        500,
+        'حدث خطأ أثناء معالجة الرسالة، يمكنك التواصل معنا مباشرة عبر واتساب.',
+        err
       );
     }
   }
@@ -629,6 +492,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       const newOrder: Order = {
         id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         orderNumber,
+        orderToken: crypto.randomUUID(),
         restaurantId: bundle.restaurant.id,
         customerName: String(customerName).trim(),
         customerPhone: cleanPhone,
@@ -677,10 +541,10 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
       return Response.json({ order: savedOrder, whatsappUrl: whatsappUrl || '' }, { status: 201 });
     } catch (err) {
-      console.error('Create order error:', err);
-      return Response.json(
-        { error: 'حدث خطأ غير متوقع أثناء تسجيل الطلب. حاول مرة أخرى.' },
-        { status: 500 }
+      return safeErrorResponse(
+        500,
+        'حدث خطأ غير متوقع أثناء تسجيل الطلب. حاول مرة أخرى.',
+        err
       );
     }
   }
@@ -692,52 +556,48 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
   if (method === 'POST' && pathname === '/api/admin/login') {
     try {
       const body = await readJsonBody<{ email?: string; password?: string }>(request);
-      const cleanEmail = String(body.email || '').trim().toLowerCase();
-      const cleanPass = String(body.password || '');
-      const expectedEmail = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-      const isPasswordValid = await verifyAdminPassword(env, cleanPass);
-      const secret = getSessionSecret(env);
-
-      if (cleanEmail === expectedEmail && isPasswordValid) {
-        const role: EmployeeRole = 'owner';
-        const token = await signAdminToken(secret, expectedEmail, role);
-        return Response.json({
-          token,
-          email: expectedEmail,
-          role,
-          permissions: ROLE_PERMISSIONS[role],
-        });
-      }
-
-      const employee = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, cleanEmail);
-      if (employee && isPasswordValid) {
-        const token = await signAdminToken(secret, employee.email, employee.role);
-        return Response.json({
-          token,
-          email: employee.email,
-          role: employee.role,
-          permissions: ROLE_PERMISSIONS[employee.role],
-        });
-      }
-
-      return Response.json(
-        { error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.' },
-        { status: 401 }
-      );
-    } catch {
-      return Response.json({ error: 'تعذر التحقق من بيانات الدخول حالياً.' }, { status: 500 });
+      return await handleAdminLogin({
+        kv,
+        env,
+        email: String(body.email || ''),
+        password: String(body.password || ''),
+        ip: clientIp,
+        lookupEmployee: (email) => findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, email),
+        verifyOwnerPassword: (pass) => verifyAdminPassword(env, pass),
+        isOwnerPasswordOverridden: () => isOwnerPasswordOverridden(env),
+        onAuditLog: (actorEmail, details) =>
+          appendActivityLog(env, {
+            id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            restaurantId: DEFAULT_RESTAURANT_ID,
+            actorName: actorEmail,
+            action: 'تسجيل دخول لوحة الإدارة',
+            details,
+            createdAt: new Date().toISOString(),
+          }),
+      });
+    } catch (err) {
+      return safeErrorResponse(500, 'تعذر التحقق من بيانات الدخول حالياً.', err);
     }
   }
 
   if (pathname.startsWith('/api/admin/')) {
-    const auth = await verifyAdminRequest(request, env);
-    if (auth instanceof Response) return auth;
+    const allowPendingPasswordChange =
+      pathname === '/api/admin/password' || pathname === '/api/admin/me';
+    const authResult = await authenticateBearerRequest({
+      requestHeaders: request.headers,
+      env,
+      resolveRole: (email) => resolveRoleForEmail(env, email),
+      allowPendingPasswordChange,
+    });
+    if (!authResult.ok) return authResult.response;
+    const auth = authResult;
 
     if (method === 'GET' && pathname === '/api/admin/me') {
       return Response.json({
         authenticated: true,
         email: auth.email,
         role: auth.role,
+        mustChangePassword: auth.mustChangePassword,
         permissions: ROLE_PERMISSIONS[auth.role],
       });
     }
@@ -775,11 +635,10 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           employees,
           activityLogs,
           notifications,
-          configStatus: getServiceConfigStatus(env),
+          configStatus: getAdminServiceConfigStatus(env, isSupabaseBackendActive(env)),
         });
       } catch (err) {
-        console.error('Admin overview error:', err);
-        return Response.json({ error: 'تعذر تحميل بيانات لوحة التحكم.' }, { status: 500 });
+        return safeErrorResponse(500, 'تعذر تحميل بيانات لوحة التحكم.', err);
       }
     }
 
@@ -807,8 +666,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           createdAt: new Date().toISOString(),
         });
         return Response.json({ restaurant: updated, hoursStatus });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ بيانات المطعم.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ بيانات المطعم.', err);
       }
     }
 
@@ -827,8 +686,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         if (!cat.name) return Response.json({ error: 'اسم القسم مطلوب.' }, { status: 400 });
         const saved = await upsertCategory(env, cat);
         return Response.json({ category: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ القسم.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ القسم.', err);
       }
     }
 
@@ -840,8 +699,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteCategory(env, restaurantId, decodeURIComponent(delCatMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف القسم.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حذف القسم.', err);
       }
     }
 
@@ -872,8 +731,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         };
         const saved = await upsertMenuItem(env, item);
         return Response.json({ item: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ الصنف.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ الصنف.', err);
       }
     }
 
@@ -888,8 +747,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         }
         await reorderMenuItems(env, restaurantId, orderedIds);
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ ترتيب الأصناف.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ ترتيب الأصناف.', err);
       }
     }
 
@@ -901,8 +760,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteMenuItem(env, restaurantId, decodeURIComponent(delItemMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف الصنف.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حذف الصنف.', err);
       }
     }
 
@@ -937,8 +796,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         });
         if (!updated) return Response.json({ error: 'الصنف غير موجود.' }, { status: 404 });
         return Response.json({ item: updated });
-      } catch {
-        return Response.json({ error: 'تعذر تعديل المخزون.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر تعديل المخزون.', err);
       }
     }
 
@@ -966,8 +825,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         };
         const saved = await upsertDeliveryZone(env, zone);
         return Response.json({ zone: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ منطقة التوصيل.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ منطقة التوصيل.', err);
       }
     }
 
@@ -979,8 +838,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteDeliveryZone(env, restaurantId, decodeURIComponent(delZoneMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف منطقة التوصيل.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حذف منطقة التوصيل.', err);
       }
     }
 
@@ -1003,8 +862,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         };
         const saved = await upsertBranch(env, branch);
         return Response.json({ branch: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ بيانات الفرع.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ بيانات الفرع.', err);
       }
     }
 
@@ -1016,8 +875,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteBranch(env, restaurantId, decodeURIComponent(delBranchMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف الفرع.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حذف الفرع.', err);
       }
     }
 
@@ -1056,8 +915,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         };
         const saved = await upsertCoupon(env, coupon);
         return Response.json({ coupon: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ كوبون الخصم.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ كوبون الخصم.', err);
       }
     }
 
@@ -1069,8 +928,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteCoupon(env, restaurantId, decodeURIComponent(delCouponMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف الكوبون.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حذف الكوبون.', err);
       }
     }
 
@@ -1086,20 +945,38 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           );
         }
         const rawRole = String(body.role || 'cashier') as EmployeeRole;
+        const plainPassword = typeof body.password === 'string' ? body.password : '';
+        let passwordHash: string | undefined;
+        let mustChangePassword: boolean | undefined;
+        if (plainPassword) {
+          if (!isStrongAdminPassword(plainPassword)) {
+            return Response.json(
+              {
+                error:
+                  'كلمة مرور الموظف يجب أن تكون 10 أحرف على الأقل وتحتوي على أحرف كبيرة وصغيرة ورقم ولا تكون كلمة افتراضية.',
+              },
+              { status: 400 }
+            );
+          }
+          passwordHash = await hashPasswordBcrypt(plainPassword);
+          mustChangePassword = body.mustChangePassword !== false;
+        }
         const employee: Employee = {
           id: String(body.id || `emp_${Date.now()}`),
           restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
           name: String(body.name).trim(),
-          email: String(body.email).trim(),
+          email: String(body.email).trim().toLowerCase(),
           phone: String(body.phone || '').trim(),
           role: VALID_ROLES.includes(rawRole) ? rawRole : 'cashier',
           isActive: body.isActive !== false,
+          passwordHash,
+          mustChangePassword,
           createdAt: String(body.createdAt || new Date().toISOString()),
         };
         const saved = await upsertEmployee(env, employee);
         return Response.json({ employee: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ بيانات الموظف.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حفظ بيانات الموظف.', err);
       }
     }
 
@@ -1111,8 +988,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteEmployee(env, restaurantId, decodeURIComponent(delEmpMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف الموظف.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر حذف الموظف.', err);
       }
     }
 
@@ -1121,8 +998,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const body = await readJsonBody<{ restaurantId?: string }>(request);
         await markNotificationsRead(env, body.restaurantId || DEFAULT_RESTAURANT_ID);
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر تحديث الإشعارات.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر تحديث الإشعارات.', err);
       }
     }
 
@@ -1154,8 +1031,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         );
         if (!updated) return Response.json({ error: 'الطلب غير موجود.' }, { status: 404 });
         return Response.json({ order: updated });
-      } catch {
-        return Response.json({ error: 'تعذر تحديث حالة الطلب.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر تحديث حالة الطلب.', err);
       }
     }
 
@@ -1180,22 +1057,21 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           'التقييم',
           'تاريخ الإنشاء',
         ].join(',');
-        const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
         const rows = orders.map((o) =>
           [
-            escapeCsv(o.orderNumber),
-            escapeCsv(o.customerName),
-            escapeCsv(o.customerPhone),
-            escapeCsv(o.fulfillmentType === 'pickup' ? 'استلام من الفرع' : 'توصيل'),
-            escapeCsv(o.deliveryZoneName || o.branchName || ''),
-            escapeCsv(o.customerAddress),
+            sanitizeCsvCell(o.orderNumber),
+            sanitizeCsvCell(o.customerName),
+            sanitizeCsvCell(o.customerPhone),
+            sanitizeCsvCell(o.fulfillmentType === 'pickup' ? 'استلام من الفرع' : 'توصيل'),
+            sanitizeCsvCell(o.deliveryZoneName || o.branchName || ''),
+            sanitizeCsvCell(o.customerAddress),
             o.subtotal,
             o.discountAmount,
             o.deliveryFee,
             o.total,
-            escapeCsv(o.status),
+            sanitizeCsvCell(o.status),
             o.rating ? `${o.rating}/5` : '',
-            escapeCsv(o.createdAt),
+            sanitizeCsvCell(o.createdAt),
           ].join(',')
         );
         const csv = '\uFEFF' + [header, ...rows].join('\n');
@@ -1205,31 +1081,80 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
             'Content-Disposition': 'attachment; filename="orders-report.csv"',
           },
         });
-      } catch {
-        return Response.json({ error: 'تعذر تصدير تقرير الطلبات.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر تصدير تقرير الطلبات.', err);
       }
     }
 
     if (method === 'POST' && pathname === '/api/admin/password') {
-      const denied = checkPermission(auth.role, 'system');
-      if (denied) return denied;
-      const body = await readJsonBody<{ currentPassword?: string; newPassword?: string }>(request);
-      const currentOk = await verifyAdminPassword(env, String(body.currentPassword || ''));
-      if (!currentOk) {
-        return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
+      const isSelfForceChange = auth.mustChangePassword;
+      if (!isSelfForceChange) {
+        const denied = checkPermission(auth.role, 'system');
+        if (denied) return denied;
       }
+
+      const body = await readJsonBody<{ currentPassword?: string; newPassword?: string }>(request);
+      const currentPass = String(body.currentPassword || '');
       const nextPass = String(body.newPassword || '');
-      if (nextPass.length < 8 || !/[A-Z]/.test(nextPass) || !/\d/.test(nextPass)) {
+
+      const expectedOwner = (env.ADMIN_EMAIL || '').trim().toLowerCase();
+      const isOwnerAccount = expectedOwner && auth.email.toLowerCase() === expectedOwner;
+
+      if (isOwnerAccount) {
+        const currentOk = await verifyAdminPassword(env, currentPass);
+        if (!currentOk) {
+          return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
+        }
+      } else {
+        const emp = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, auth.email);
+        if (!emp || !emp.passwordHash || !(await verifyPasswordAgainstHash(currentPass, emp.passwordHash))) {
+          return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
+        }
+      }
+
+      if (!isStrongAdminPassword(nextPass)) {
         return Response.json(
           {
             error:
-              'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.',
+              'كلمة المرور الجديدة يجب أن تكون 10 أحرف على الأقل وتحتوي على حرف كبير وحرف صغير ورقم ولا تكون من كلمات المرور الافتراضية.',
           },
           { status: 400 }
         );
       }
-      await setAdminPassword(env, nextPass);
-      return Response.json({ ok: true });
+
+      if (isOwnerAccount) {
+        await setAdminPassword(env, nextPass);
+      } else {
+        const emp = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, auth.email);
+        if (emp) {
+          await upsertEmployee(env, {
+            ...emp,
+            passwordHash: await hashPasswordBcrypt(nextPass),
+            mustChangePassword: false,
+          });
+        }
+      }
+
+      await appendActivityLog(env, {
+        id: `act_${Date.now()}`,
+        restaurantId: DEFAULT_RESTAURANT_ID,
+        actorName: auth.email,
+        action: 'تغيير كلمة المرور',
+        details: 'تم تحديث كلمة المرور بنجاح.',
+        createdAt: new Date().toISOString(),
+      });
+
+      const secret = getEffectiveSessionSecret(env);
+      const refreshedToken = secret
+        ? await signAdminJwt({
+            secret,
+            email: auth.email,
+            role: auth.role,
+            mustChangePassword: false,
+          })
+        : undefined;
+
+      return Response.json({ ok: true, token: refreshedToken, mustChangePassword: false });
     }
 
     if (method === 'POST' && pathname === '/api/admin/upload') {
@@ -1258,8 +1183,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           cleanBase64
         );
         return Response.json({ url: uploadedUrl });
-      } catch {
-        return Response.json({ error: 'تعذر رفع الصورة حالياً.' }, { status: 500 });
+      } catch (err) {
+        return safeErrorResponse(500, 'تعذر رفع الصورة حالياً.', err);
       }
     }
   }
@@ -1267,23 +1192,93 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
   return Response.json({ error: 'Endpoint not found' }, { status: 404 });
 }
 
+const FALLBACK_404_HTML = `<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>الصفحة غير موجودة (404) — مشويات الحارة</title>
+  </head>
+  <body style="font-family: Cairo, system-ui, sans-serif; background:#F7F3E9; color:#18221D; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; text-align:center;">
+    <main style="max-width:460px; padding:32px; background:#fff; border-radius:20px; border:1px solid #E5E0D5;">
+      <h1 style="font-size:48px; margin:0 0 8px; color:#104B34;">404</h1>
+      <p style="font-size:18px; font-weight:700; margin:0 0 8px;">الصفحة غير موجودة</p>
+      <p style="font-size:14px; color:#4A5850; margin:0 0 24px;">الرابط الذي طلبته غير متوفر في موقع مشويات الحارة.</p>
+      <a href="/" style="display:inline-block; background:#104B34; color:#fff; padding:12px 24px; border-radius:12px; text-decoration:none; font-weight:700;">العودة للرئيسية</a>
+    </main>
+  </body>
+</html>`;
+
 export default {
   async fetch(request: Request, env: EdgeEnv): Promise<Response> {
+    const preflight = handleCorsPreflight(request, env.ALLOWED_ORIGINS);
+    if (preflight) return preflight;
+
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
       const res = await handleApiRequest(request, env);
-      return withSecurityHeaders(res);
+      return applySecurityHeaders(res, request, env.ALLOWED_ORIGINS);
     }
 
-    if (env.ASSETS) {
+    if (!env.ASSETS) {
+      return applySecurityHeaders(
+        new Response('Static assets binding (ASSETS) is not configured.', { status: 500 }),
+        request,
+        env.ALLOWED_ORIGINS
+      );
+    }
+
+    if (isStaticAssetPath(url.pathname)) {
       const assetRes = await env.ASSETS.fetch(request);
-      const contentType = assetRes.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
-        return withSecurityHeaders(assetRes);
-      }
-      return assetRes;
+      return applySecurityHeaders(assetRes, request, env.ALLOWED_ORIGINS);
     }
 
-    return new Response('Static assets binding (ASSETS) is not configured.', { status: 500 });
+    if (isKnownSpaRoute(url.pathname)) {
+      const indexReq = new Request(new URL('/index.html', url.origin).toString(), {
+        method: 'GET',
+        headers: request.headers,
+      });
+      const indexRes = await env.ASSETS.fetch(indexReq);
+      if (indexRes.ok) {
+        return applySecurityHeaders(
+          new Response(indexRes.body, {
+            status: 200,
+            headers: indexRes.headers,
+          }),
+          request,
+          env.ALLOWED_ORIGINS
+        );
+      }
+    }
+
+    // Real 404 for unknown routes (no Soft 404)
+    const notFoundReq = new Request(new URL('/404.html', url.origin).toString(), {
+      method: 'GET',
+      headers: request.headers,
+    });
+    const notFoundRes = await env.ASSETS.fetch(notFoundReq).catch(() => null);
+    if (notFoundRes && notFoundRes.ok) {
+      return applySecurityHeaders(
+        new Response(notFoundRes.body, {
+          status: 404,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+          },
+        }),
+        request,
+        env.ALLOWED_ORIGINS
+      );
+    }
+
+    return applySecurityHeaders(
+      new Response(FALLBACK_404_HTML, {
+        status: 404,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+        },
+      }),
+      request,
+      env.ALLOWED_ORIGINS
+    );
   },
 };

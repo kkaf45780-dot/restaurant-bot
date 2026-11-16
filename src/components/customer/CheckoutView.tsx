@@ -2,6 +2,7 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  Copy,
   ExternalLink,
   MapPin,
   Minus,
@@ -78,6 +79,7 @@ export function CheckoutView({
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [copiedToken, setCopiedToken] = useState(false);
   const [idempotencyKey] = useState(
     () => `idem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   );
@@ -247,13 +249,35 @@ export function CheckoutView({
             </div>
           </div>
 
+          <div className="rounded-2xl bg-[#FAF7F0] border border-[#C5A46D]/40 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-extrabold text-[#104B34]">رمز التتبع الآمن للطلب</p>
+              <p dir="ltr" className="text-xs font-mono text-[#35443C] truncate mt-0.5">
+                {order.orderToken}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const trackUrl = `${window.location.origin}/track?token=${encodeURIComponent(order.orderToken)}`;
+                navigator.clipboard?.writeText(trackUrl).catch(() => {});
+                setCopiedToken(true);
+                setTimeout(() => setCopiedToken(false), 2500);
+              }}
+              className="min-h-[38px] px-3.5 rounded-xl bg-white border border-[#176B45]/25 text-xs font-bold text-[#104B34] hover:bg-[#F7F3E9] inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>{copiedToken ? 'تم نسخ رابط التتبع' : 'نسخ رابط التتبع'}</span>
+            </button>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {whatsappUrl && (
               <a
                 href={whatsappUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="min-h-[48px] px-5 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-extrabold flex items-center justify-center gap-2 transition-colors"
+                className="min-h-[48px] px-5 rounded-xl bg-[#15803D] hover:bg-[#104B34] text-white text-sm font-extrabold flex items-center justify-center gap-2 transition-colors"
               >
                 <span>إرسال الطلب عبر واتساب</span>
                 <ExternalLink className="w-4 h-4" />
@@ -261,7 +285,7 @@ export function CheckoutView({
             )}
             <button
               type="button"
-              onClick={() => onTrackOrder(order.orderNumber)}
+              onClick={() => onTrackOrder(order.orderToken)}
               className="min-h-[48px] px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer transition-colors"
             >
               <PackageCheck className="w-4 h-4" />

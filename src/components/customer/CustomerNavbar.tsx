@@ -199,7 +199,7 @@ export function CustomerNavbar({
           >
             <Heart className="w-4 h-4" />
             {favoritesCount > 0 && (
-              <span className="absolute -top-1.5 -left-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[#C5A46D] text-white text-[10px] font-extrabold flex items-center justify-center tabular-nums">
+              <span className="absolute -top-1.5 -left-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[#C5A46D] text-[#104B34] text-[10px] font-extrabold flex items-center justify-center tabular-nums">
                 {favoritesCount}
               </span>
             )}

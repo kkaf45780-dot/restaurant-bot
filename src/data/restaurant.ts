@@ -604,16 +604,6 @@ export const INITIAL_COUPONS: Coupon[] = [
 
 export const INITIAL_EMPLOYEES: Employee[] = [
   {
-    id: 'emp_owner',
-    restaurantId: DEFAULT_RESTAURANT_ID,
-    name: 'أحمد المنشاوي',
-    email: 'admin@hara-grill.eg',
-    phone: '01098765432',
-    role: 'owner',
-    isActive: true,
-    createdAt: '2026-10-01T09:00:00.000Z',
-  },
-  {
     id: 'emp_cashier',
     restaurantId: DEFAULT_RESTAURANT_ID,
     name: 'محمود الكاشير',
@@ -714,6 +704,7 @@ export const INITIAL_ORDERS: Order[] = [
   {
     id: 'ord_demo_1024',
     orderNumber: '1024',
+    orderToken: '11111111-1111-4111-8111-102400001024',
     restaurantId: DEFAULT_RESTAURANT_ID,
     customerName: 'أحمد محمود',
     customerPhone: '01012345678',
@@ -763,6 +754,7 @@ export const INITIAL_ORDERS: Order[] = [
   {
     id: 'ord_demo_1023',
     orderNumber: '1023',
+    orderToken: '11111111-1111-4111-8111-102300001023',
     restaurantId: DEFAULT_RESTAURANT_ID,
     customerName: 'سارة إبراهيم',
     customerPhone: '01122334455',
@@ -807,6 +799,7 @@ export const INITIAL_ORDERS: Order[] = [
   {
     id: 'ord_demo_1022',
     orderNumber: '1022',
+    orderToken: '11111111-1111-4111-8111-102200001022',
     restaurantId: DEFAULT_RESTAURANT_ID,
     customerName: 'يوسف حسن',
     customerPhone: '01233445566',

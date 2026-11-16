@@ -96,7 +96,7 @@ export function MenuCatalogView({
               onChange={(e) => setSearchQuery(e.target.value)}
               aria-label="ابحث عن صنف في القائمة"
               placeholder="ابحث عن صنف... (مثال: كباب، حواوشي، أم علي)"
-              className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9] dark:bg-[#0E1713] border border-[#176B45]/15 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+              className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9] dark:bg-[#0E1713] border border-[#176B45]/15 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#4A5850] dark:placeholder:text-[#A3B8AE] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
             />
           </div>
 
@@ -230,7 +230,7 @@ export function MenuCatalogView({
                           {item.description}
                         </p>
                         {(item.sizes.length > 1 || item.extras.length > 0) && (
-                          <p className="text-[11px] font-semibold text-[#C5A46D]">
+                          <p className="text-[11px] font-semibold text-[#7C5A1E] dark:text-[#E7C98F]">
                             يتوفر أحجام وإضافات اختيارية
                           </p>
                         )}

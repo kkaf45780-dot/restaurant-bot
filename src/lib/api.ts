@@ -14,6 +14,8 @@ import type {
   OrderDraft,
   OrderDraftItem,
   OrderStatus,
+  PublicConfigStatus,
+  PublicOrderTracking,
   Restaurant,
   RestaurantBranch,
   RestaurantBundle,
@@ -25,6 +27,18 @@ import type { AdminTabPermission } from './permissions.ts';
 import type { CalculatedOrderResult } from './pricing.ts';
 
 const ADMIN_TOKEN_KEY = 'moazzaf_admin_token';
+
+export class ChatApiError extends Error {
+  status: number;
+  captchaRequired?: boolean;
+
+  constructor(message: string, status: number, captchaRequired?: boolean) {
+    super(message);
+    this.name = 'ChatApiError';
+    this.status = status;
+    this.captchaRequired = captchaRequired;
+  }
+}
 
 export function getStoredAdminToken(): string | null {
   try {
@@ -51,9 +65,9 @@ async function parseJsonOrThrow<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-export async function fetchConfigStatus(): Promise<ServiceConfigStatus> {
+export async function fetchConfigStatus(): Promise<PublicConfigStatus> {
   const res = await fetch('/api/config/status');
-  return parseJsonOrThrow<ServiceConfigStatus>(res);
+  return parseJsonOrThrow<PublicConfigStatus>(res);
 }
 
 export async function fetchRestaurantBundle(slug?: string): Promise<{
@@ -85,33 +99,23 @@ export async function validateCouponCode(payload: {
   return parseJsonOrThrow(res);
 }
 
-export async function trackOrderByNumber(
+export async function trackOrderByToken(
   restaurantId: string,
-  orderNumber: string
-): Promise<{ order: Order }> {
+  orderToken: string
+): Promise<{ tracking: PublicOrderTracking }> {
   const res = await fetch(
-    `/api/orders/track?restaurantId=${encodeURIComponent(restaurantId)}&orderNumber=${encodeURIComponent(orderNumber)}`
-  );
-  return parseJsonOrThrow(res);
-}
-
-export async function lookupCustomerOrdersByPhone(
-  restaurantId: string,
-  phone: string
-): Promise<{ orders: Order[] }> {
-  const res = await fetch(
-    `/api/orders/track?restaurantId=${encodeURIComponent(restaurantId)}&phone=${encodeURIComponent(phone)}`
+    `/api/orders/track?restaurantId=${encodeURIComponent(restaurantId)}&token=${encodeURIComponent(orderToken.trim())}`
   );
   return parseJsonOrThrow(res);
 }
 
 export async function submitOrderRating(
   restaurantId: string,
-  orderNumber: string,
+  orderToken: string,
   rating: number,
   comment: string
-): Promise<{ order: Order }> {
-  const res = await fetch(`/api/orders/${encodeURIComponent(orderNumber)}/rate`, {
+): Promise<{ tracking: PublicOrderTracking }> {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderToken.trim())}/rate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ restaurantId, rating, comment }),
@@ -124,6 +128,7 @@ export async function sendChatMessage(payload: {
   message: string;
   history: Array<{ role: 'user' | 'assistant'; text: string }>;
   orderDraft: OrderDraft;
+  captchaToken?: string;
 }): Promise<{
   reply: string;
   suggestedAction: SuggestedChatAction;
@@ -136,7 +141,22 @@ export async function sendChatMessage(payload: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  return parseJsonOrThrow(res);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const errBody = data as { error?: string; captchaRequired?: boolean };
+    throw new ChatApiError(
+      errBody.error || 'حدث خطأ أثناء الاتصال بالخادم.',
+      res.status,
+      errBody.captchaRequired
+    );
+  }
+  return data as {
+    reply: string;
+    suggestedAction: SuggestedChatAction;
+    updatedDraft: OrderDraft;
+    totals: CalculatedOrderResult;
+    usedFallback: boolean;
+  };
 }
 
 export async function submitOrder(payload: {
@@ -178,6 +198,7 @@ export async function adminLoginLocal(
   token: string;
   email: string;
   role?: EmployeeRole;
+  mustChangePassword?: boolean;
   permissions?: AdminTabPermission[];
 }> {
   const res = await fetch('/api/admin/login', {
@@ -192,6 +213,7 @@ export async function fetchAdminMe(token: string): Promise<{
   authenticated: boolean;
   email: string;
   role?: EmployeeRole;
+  mustChangePassword?: boolean;
   permissions?: AdminTabPermission[];
 }> {
   const res = await fetch('/api/admin/me', {
@@ -454,13 +476,13 @@ export async function adminUpdatePassword(
   token: string,
   currentPassword: string,
   newPassword: string
-): Promise<void> {
+): Promise<{ ok: boolean; token?: string; mustChangePassword?: boolean }> {
   const res = await fetch('/api/admin/password', {
     method: 'POST',
     headers: adminHeaders(token),
     body: JSON.stringify({ currentPassword, newPassword }),
   });
-  await parseJsonOrThrow(res);
+  return parseJsonOrThrow(res);
 }
 
 export async function adminUploadImage(

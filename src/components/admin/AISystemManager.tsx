@@ -280,13 +280,14 @@ export function SystemSettingsSection({
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
     if (
-      newPassword.length < 8 ||
+      newPassword.length < 10 ||
       !/[A-Z]/.test(newPassword) ||
+      !/[a-z]/.test(newPassword) ||
       !/\d/.test(newPassword)
     ) {
       onNotify(
         'error',
-        'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.'
+        'كلمة المرور الجديدة يجب أن تكون 10 أحرف على الأقل وتحتوي على حرف كبير وحرف صغير ورقم.'
       );
       return;
     }
@@ -455,10 +456,10 @@ export function SystemSettingsSection({
               type="password"
               dir="ltr"
               required
-              minLength={8}
+              minLength={10}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="كلمة المرور الجديدة (8 أحرف، حرف كبير ورقم)"
+              placeholder="كلمة المرور الجديدة (10 أحرف، كبير وصغير ورقم)"
               className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-left"
             />
           </div>

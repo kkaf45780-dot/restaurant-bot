@@ -1,5 +1,17 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
+  COMPROMISED_DEFAULT_PASSWORDS,
+  constantTimeEqual,
+  hashPasswordBcrypt,
+  verifyPasswordAgainstHash,
+} from '../../worker/auth.ts';
+import {
+  findOrderByTokenSupabase,
+  incrementCouponUsageSupabase,
+  insertOrderItemsSupabase,
+  isProductionSupabaseRequired,
+} from '../../worker/db/supabase.ts';
+import {
   DEFAULT_RESTAURANT_ID,
   INITIAL_ACTIVITY_LOGS,
   INITIAL_BRANCHES,
@@ -42,10 +54,17 @@ export interface AssetsBindingLike {
 export interface EdgeEnv {
   ASSETS?: AssetsBindingLike;
   RESTAURANT_DB?: KVNamespaceLike;
+  RATE_LIMIT_KV?: KVNamespaceLike;
   GEMINI_API_KEY?: string;
   ADMIN_EMAIL?: string;
+  ADMIN_INITIAL_PASSWORD?: string;
   ADMIN_PASSWORD?: string;
+  ADMIN_PASSWORD_HASH?: string;
   ADMIN_SESSION_SECRET?: string;
+  ALLOWED_ORIGINS?: string;
+  TURNSTILE_SECRET_KEY?: string;
+  APP_VERSION?: string;
+  REQUIRE_SUPABASE?: string;
   SUPABASE_URL?: string;
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_ANON_KEY?: string;
@@ -110,6 +129,13 @@ async function readEdgeDb(env: EdgeEnv): Promise<EdgeDatabaseSchema> {
       const stored = (await env.RESTAURANT_DB.get(KV_DB_KEY, 'json')) as Partial<EdgeDatabaseSchema> | null;
       if (stored && stored.restaurants?.length) {
         const seed = getInitialDb();
+        const ordersWithTokens = (stored.orders ?? seed.orders).map((o) => ({
+          ...o,
+          orderToken: o.orderToken || crypto.randomUUID(),
+        }));
+        const cleanedEmployees = (stored.employees?.length ? stored.employees : seed.employees).filter(
+          (e) => e.email.toLowerCase() !== 'admin@hara-grill.eg'
+        );
         return {
           restaurants: stored.restaurants,
           categories: stored.categories?.length ? stored.categories : seed.categories,
@@ -117,9 +143,9 @@ async function readEdgeDb(env: EdgeEnv): Promise<EdgeDatabaseSchema> {
           deliveryZones: stored.deliveryZones?.length ? stored.deliveryZones : seed.deliveryZones,
           branches: stored.branches?.length ? stored.branches : seed.branches,
           coupons: stored.coupons ?? seed.coupons,
-          orders: stored.orders ?? seed.orders,
+          orders: ordersWithTokens,
           inventoryMovements: stored.inventoryMovements ?? seed.inventoryMovements,
-          employees: stored.employees?.length ? stored.employees : seed.employees,
+          employees: cleanedEmployees,
           activityLogs: stored.activityLogs ?? seed.activityLogs,
           notifications: stored.notifications ?? seed.notifications,
           aiLogs: stored.aiLogs ?? [],
@@ -184,6 +210,7 @@ function mapSupabaseOrder(row: Record<string, unknown>): Order {
   return {
     id: String(row.id),
     orderNumber: String(row.order_number),
+    orderToken: String(row.order_token || row.id),
     restaurantId: String(row.restaurant_id),
     customerName: String(row.customer_name),
     customerPhone: String(row.customer_phone),
@@ -703,6 +730,10 @@ export async function incrementCouponUsage(
   code: string
 ): Promise<void> {
   const upper = code.trim().toUpperCase();
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    await incrementCouponUsageSupabase(supabase, restaurantId, upper).catch(() => {});
+  }
   const db = await readEdgeDb(env);
   const idx = db.coupons.findIndex(
     (c) => c.restaurantId === restaurantId && c.code.toUpperCase() === upper
@@ -725,11 +756,33 @@ export async function listOrders(env: EdgeEnv, restaurantId: string): Promise<Or
       return data.map((row) => mapSupabaseOrder(row));
     }
   }
+  if (isProductionSupabaseRequired(env)) {
+    throw new Error('Supabase database is required in production mode.');
+  }
 
   const db = await readEdgeDb(env);
   return db.orders
     .filter((o) => o.restaurantId === restaurantId)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+export async function findOrderByToken(
+  env: EdgeEnv,
+  restaurantId: string,
+  orderToken: string
+): Promise<Order | null> {
+  const clean = orderToken.trim();
+  if (!clean) return null;
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const remote = await findOrderByTokenSupabase(supabase, restaurantId, clean);
+    if (remote) return remote;
+  }
+  if (isProductionSupabaseRequired(env) && !supabase) {
+    throw new Error('Supabase database is required in production mode.');
+  }
+  const db = await readEdgeDb(env);
+  return db.orders.find((o) => o.restaurantId === restaurantId && o.orderToken === clean) ?? null;
 }
 
 export async function findOrderByNumberOrId(
@@ -765,54 +818,67 @@ export async function findOrderByIdempotencyKey(
 }
 
 export async function createOrder(env: EdgeEnv, order: Order): Promise<Order> {
+  const safeOrder: Order = {
+    ...order,
+    orderToken: order.orderToken || crypto.randomUUID(),
+  };
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
     const { error } = await supabase.from('orders').insert({
-      id: order.id,
-      order_number: order.orderNumber,
-      restaurant_id: order.restaurantId,
-      customer_name: order.customerName,
-      customer_phone: order.customerPhone,
-      fulfillment_type: order.fulfillmentType,
-      delivery_zone_id: order.deliveryZoneId,
-      delivery_zone_name: order.deliveryZoneName,
-      branch_id: order.branchId ?? null,
-      branch_name: order.branchName ?? null,
-      customer_address: order.customerAddress,
-      notes: order.notes,
-      items: order.items,
-      subtotal: order.subtotal,
-      discount_amount: order.discountAmount,
-      coupon_code: order.couponCode ?? null,
-      delivery_fee: order.deliveryFee,
-      total: order.total,
-      payment_method: order.paymentMethod,
-      payment_status: order.paymentStatus,
-      estimated_delivery_text: order.estimatedDeliveryText ?? null,
-      stock_deducted: Boolean(order.stockDeducted),
-      idempotency_key: order.idempotencyKey ?? null,
-      status: order.status,
-      status_history: order.statusHistory,
-      created_at: order.createdAt,
-      updated_at: order.updatedAt,
+      id: safeOrder.id,
+      order_number: safeOrder.orderNumber,
+      order_token: safeOrder.orderToken,
+      restaurant_id: safeOrder.restaurantId,
+      customer_name: safeOrder.customerName,
+      customer_phone: safeOrder.customerPhone,
+      fulfillment_type: safeOrder.fulfillmentType,
+      delivery_zone_id: safeOrder.deliveryZoneId,
+      delivery_zone_name: safeOrder.deliveryZoneName,
+      branch_id: safeOrder.branchId ?? null,
+      branch_name: safeOrder.branchName ?? null,
+      customer_address: safeOrder.customerAddress,
+      notes: safeOrder.notes,
+      items: safeOrder.items,
+      subtotal: safeOrder.subtotal,
+      discount_amount: safeOrder.discountAmount,
+      coupon_code: safeOrder.couponCode ?? null,
+      delivery_fee: safeOrder.deliveryFee,
+      total: safeOrder.total,
+      payment_method: safeOrder.paymentMethod,
+      payment_status: safeOrder.paymentStatus,
+      estimated_delivery_text: safeOrder.estimatedDeliveryText ?? null,
+      stock_deducted: Boolean(safeOrder.stockDeducted),
+      idempotency_key: safeOrder.idempotencyKey ?? null,
+      status: safeOrder.status,
+      status_history: safeOrder.statusHistory,
+      created_at: safeOrder.createdAt,
+      updated_at: safeOrder.updatedAt,
     });
-    if (!error) return order;
+    if (!error) {
+      await insertOrderItemsSupabase(supabase, safeOrder).catch(() => {});
+      return safeOrder;
+    }
+    if (isProductionSupabaseRequired(env)) {
+      throw new Error('Failed to persist order to Supabase.');
+    }
+  } else if (isProductionSupabaseRequired(env)) {
+    throw new Error('Supabase configuration is required in production mode.');
   }
 
   const db = await readEdgeDb(env);
-  db.orders.unshift(order);
+  db.orders.unshift(safeOrder);
   db.notifications.unshift({
     id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-    restaurantId: order.restaurantId,
+    restaurantId: safeOrder.restaurantId,
     type: 'order',
-    title: `طلب جديد #${order.orderNumber}`,
-    message: `طلب من ${order.customerName} بقيمة ${order.total} ج.م.`,
+    title: `طلب جديد #${safeOrder.orderNumber}`,
+    message: `طلب من ${safeOrder.customerName} بقيمة ${safeOrder.total} ج.م.`,
     isRead: false,
-    createdAt: order.createdAt,
+    createdAt: safeOrder.createdAt,
   });
   db.notifications = db.notifications.slice(0, 40);
   await writeEdgeDb(env, db);
-  return order;
+  return safeOrder;
 }
 
 export async function adjustItemStock(
@@ -1010,24 +1076,24 @@ export async function updateOrderStatus(
   return updatedOrder;
 }
 
-export async function rateOrder(
+export async function rateOrderByToken(
   env: EdgeEnv,
   restaurantId: string,
-  orderNumber: string,
+  orderToken: string,
   rating: number,
   comment: string
 ): Promise<Order | null> {
-  const cleanNum = orderNumber.replace(/^#/, '').trim();
+  const cleanToken = orderToken.trim();
+  if (!cleanToken) return null;
   const db = await readEdgeDb(env);
   const idx = db.orders.findIndex(
-    (o) => o.restaurantId === restaurantId && (o.orderNumber === cleanNum || o.id === cleanNum)
+    (o) => o.restaurantId === restaurantId && o.orderToken === cleanToken
   );
 
   const supabase = getSupabaseAdminClient(env);
   let target: Order | null = idx >= 0 ? db.orders[idx] : null;
   if (!target && supabase) {
-    const found = await findOrderByNumberOrId(env, restaurantId, cleanNum);
-    if (found) target = found;
+    target = await findOrderByTokenSupabase(supabase, restaurantId, cleanToken);
   }
   if (!target) return null;
 
@@ -1067,6 +1133,16 @@ export async function rateOrder(
   return updated;
 }
 
+export async function rateOrder(
+  env: EdgeEnv,
+  restaurantId: string,
+  orderToken: string,
+  rating: number,
+  comment: string
+): Promise<Order | null> {
+  return rateOrderByToken(env, restaurantId, orderToken, rating, comment);
+}
+
 export async function listInventoryMovements(
   env: EdgeEnv,
   restaurantId: string
@@ -1077,7 +1153,9 @@ export async function listInventoryMovements(
 
 export async function listEmployees(env: EdgeEnv, restaurantId: string): Promise<Employee[]> {
   const db = await readEdgeDb(env);
-  return db.employees.filter((e) => e.restaurantId === restaurantId);
+  return db.employees
+    .filter((e) => e.restaurantId === restaurantId)
+    .map(({ passwordHash: _omitted, ...safe }) => safe);
 }
 
 export async function findEmployeeByEmail(
@@ -1097,10 +1175,17 @@ export async function findEmployeeByEmail(
 export async function upsertEmployee(env: EdgeEnv, emp: Employee): Promise<Employee> {
   const db = await readEdgeDb(env);
   const idx = db.employees.findIndex((e) => e.id === emp.id);
-  if (idx >= 0) db.employees[idx] = emp;
-  else db.employees.unshift(emp);
+  const existing = idx >= 0 ? db.employees[idx] : null;
+  const toSave: Employee = {
+    ...emp,
+    passwordHash: emp.passwordHash ?? existing?.passwordHash,
+    mustChangePassword: emp.mustChangePassword ?? existing?.mustChangePassword,
+  };
+  if (idx >= 0) db.employees[idx] = toSave;
+  else db.employees.unshift(toSave);
   await writeEdgeDb(env, db);
-  return emp;
+  const { passwordHash: _omitted, ...safe } = toSave;
+  return safe;
 }
 
 export async function deleteEmployee(
@@ -1199,62 +1284,38 @@ export async function listAiLogs(env: EdgeEnv, restaurantId: string): Promise<AI
   return db.aiLogs.filter((l) => l.restaurantId === restaurantId);
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function hashPasswordEdge(password: string, saltHex?: string): Promise<string> {
-  const salt =
-    saltHex || bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
-  const derived = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      salt: enc.encode(salt),
-      iterations: 10000,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    256
-  );
-  return `pbkdf2$${salt}$${bytesToHex(new Uint8Array(derived))}`;
-}
-
-function safeEqualEdge(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
+export async function isOwnerPasswordOverridden(env: EdgeEnv): Promise<boolean> {
+  if (env.ADMIN_PASSWORD_HASH?.trim()) return true;
+  const db = await readEdgeDb(env);
+  return Boolean(db.adminPasswordOverride);
 }
 
 export async function verifyAdminPassword(env: EdgeEnv, candidate: string): Promise<boolean> {
+  if (!candidate || COMPROMISED_DEFAULT_PASSWORDS.has(candidate)) {
+    return false;
+  }
+
   const db = await readEdgeDb(env);
   const stored = db.adminPasswordOverride;
   if (stored) {
-    if (stored.startsWith('pbkdf2$')) {
-      const [, salt, expectedHash] = stored.split('$');
-      if (!salt || !expectedHash) return false;
-      const computed = (await hashPasswordEdge(candidate, salt)).split('$')[2] || '';
-      return safeEqualEdge(computed, expectedHash);
-    }
-    return safeEqualEdge(candidate, stored);
+    return verifyPasswordAgainstHash(candidate, stored);
   }
-  const envPass = env.ADMIN_PASSWORD || 'Admin@1234';
-  return safeEqualEdge(candidate, envPass);
+
+  const envHash = env.ADMIN_PASSWORD_HASH?.trim();
+  if (envHash) {
+    return verifyPasswordAgainstHash(candidate, envHash);
+  }
+
+  const initialPass = (env.ADMIN_INITIAL_PASSWORD || env.ADMIN_PASSWORD || '').trim();
+  if (!initialPass || COMPROMISED_DEFAULT_PASSWORDS.has(initialPass)) {
+    return false;
+  }
+  return constantTimeEqual(candidate, initialPass);
 }
 
 export async function setAdminPassword(env: EdgeEnv, newPassword: string): Promise<void> {
   const db = await readEdgeDb(env);
-  db.adminPasswordOverride = await hashPasswordEdge(newPassword);
+  db.adminPasswordOverride = await hashPasswordBcrypt(newPassword);
   await writeEdgeDb(env, db);
 }
 
