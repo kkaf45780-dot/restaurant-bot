@@ -4,7 +4,7 @@ import { adminLoginLocal } from '../../lib/api.ts';
 import { isSupabaseClientConfigured, supabase } from '../../lib/supabase.ts';
 
 interface AdminLoginProps {
-  onSuccess: (token: string, email: string, mustChangePassword?: boolean) => void;
+  onSuccess: (token: string, email: string) => void;
   onBackToStore: () => void;
 }
 
@@ -33,13 +33,13 @@ export function AdminLogin({
           password,
         });
         if (!error && data.session?.access_token) {
-          onSuccess(data.session.access_token, data.user?.email ?? email.trim(), false);
+          onSuccess(data.session.access_token, data.user?.email ?? email.trim());
           return;
         }
         if (error) {
           try {
             const localRes = await adminLoginLocal(email.trim(), password);
-            onSuccess(localRes.token, localRes.email, localRes.mustChangePassword);
+            onSuccess(localRes.token, localRes.email);
             return;
           } catch {
             throw new Error('بيانات الدخول غير صحيحة. تأكد من البريد الإلكتروني وكلمة المرور.');
@@ -48,7 +48,7 @@ export function AdminLogin({
       }
 
       const res = await adminLoginLocal(email.trim(), password);
-      onSuccess(res.token, res.email, res.mustChangePassword);
+      onSuccess(res.token, res.email);
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'تعذر تسجيل الدخول، حاول مرة أخرى.'

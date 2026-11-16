@@ -95,7 +95,9 @@ export function evaluateCoupon(
     };
   }
 
-  if (coupon.usageLimit > 0 && coupon.usedCount >= coupon.usageLimit) {
+  const usageLimit = coupon.usageLimit ?? 0;
+  const usedCount = coupon.usedCount ?? 0;
+  if (usageLimit > 0 && usedCount >= usageLimit) {
     return {
       valid: false,
       coupon,

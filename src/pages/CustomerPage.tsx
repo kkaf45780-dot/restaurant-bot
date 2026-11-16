@@ -20,32 +20,38 @@ import {
   useOnlineStatus,
   usePWAInstall,
 } from '../hooks/usePWAOnlineTheme.ts';
-import { ChatApiError, fetchRestaurantBundle, sendChatMessage } from '../lib/api.ts';
 import {
-  clearStoredChat,
+  ApiError,
+  fetchChatChallenge,
+  fetchRestaurantBundle,
+  sendChatMessage,
+} from '../lib/api.ts';
+import {
+  clearChatHistory,
   getChatOptOut,
-  loadStoredChat,
-  loadStoredDraft,
-  saveStoredChat,
-  saveStoredDraft,
+  loadChatHistory,
+  saveChatHistory,
+  sanitizeDraftForStorage,
   setChatOptOut,
-} from '../lib/chat-storage.ts';
+} from '../lib/chatStorage.ts';
 import type { RestaurantHoursStatus } from '../lib/hours.ts';
 import { buildDraftLineKey } from '../lib/pricing.ts';
 import type {
+  ChatChallengeResponse,
   ChatMessage,
+  ChatVerificationPayload,
   MenuItem,
   Order,
   OrderDraft,
   OrderDraftItem,
   RestaurantBundle,
-  SuggestedChatAction,
 } from '../types/restaurant.ts';
 
 interface CustomerPageProps {
   route: CustomerRoute;
+  initialTrackOrderNumber?: string;
   initialTrackOrderToken?: string;
-  onNavigateRoute: (route: CustomerRoute, trackOrderToken?: string) => void;
+  onNavigateRoute: (route: CustomerRoute, trackOrder?: string, trackToken?: string) => void;
   onNavigateAdmin: () => void;
 }
 
@@ -63,10 +69,25 @@ const EMPTY_DRAFT: OrderDraft = {
 
 const FAVORITES_KEY = 'moazzaf_favorites_v1';
 const ORDER_HISTORY_KEY = 'moazzaf_order_history_v1';
+const ORDER_TOKENS_KEY = 'moazzaf_order_tokens_v1';
 const CACHED_BUNDLE_KEY = 'moazzaf_cached_bundle_v1';
+const CHAT_SESSION_STORAGE_KEY = 'moazzaf_chat_session_v1';
+
+function getOrCreateChatSessionId(): string {
+  try {
+    const existing = sessionStorage.getItem(CHAT_SESSION_STORAGE_KEY);
+    if (existing && existing.length >= 6) return existing;
+    const generated = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem(CHAT_SESSION_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
 
 export function CustomerPage({
   route,
+  initialTrackOrderNumber,
   initialTrackOrderToken,
   onNavigateRoute,
   onNavigateAdmin,
@@ -86,15 +107,19 @@ export function CustomerPage({
   const [editingCartLine, setEditingCartLine] = useState<OrderDraftItem | null>(null);
   const [shareModalOpen, setShareModalOpen] = useState(false);
 
+  const [sessionId] = useState<string>(() => getOrCreateChatSessionId());
+  const [chatOptOut, setChatOptOutState] = useState<boolean>(() => getChatOptOut());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
-  const [chatOptOut, setChatOptOutState] = useState(false);
-  const [chatCaptchaRequired, setChatCaptchaRequired] = useState(false);
-  const [pendingChatMessage, setPendingChatMessage] = useState<string | null>(null);
+  const [pendingChallenge, setPendingChallenge] = useState<ChatChallengeResponse | null>(null);
+  const [pendingRetryMessage, setPendingRetryMessage] = useState<string | null>(null);
+  const [challengeSubmitting, setChallengeSubmitting] = useState(false);
+
   const [orderDraft, setOrderDraft] = useState<OrderDraft>(EMPTY_DRAFT);
   const [confirmedOrderState, setConfirmedOrderState] = useState<{
     order: Order;
     whatsappUrl: string;
+    orderToken?: string;
   } | null>(null);
 
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
@@ -115,6 +140,15 @@ export function CustomerPage({
     }
   });
 
+  const [orderTokens, setOrderTokens] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(ORDER_TOKENS_KEY);
+      return saved ? (JSON.parse(saved) as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  });
+
   const [toastText, setToastText] = useState<string | null>(null);
   const showToast = useCallback((text: string) => {
     setToastText(text);
@@ -126,22 +160,16 @@ export function CustomerPage({
   const hydrateAfterBundle = useCallback((loadedBundle: RestaurantBundle) => {
     document.title = `موظف المطعم — ${loadedBundle.restaurant.name}`;
     const restId = loadedBundle.restaurant.id;
-    const optedOut = getChatOptOut(restId);
-    setChatOptOutState(optedOut);
+    // Remove legacy unscrubbed chat cache if present
+    try {
+      localStorage.removeItem(`chat_${restId}`);
+    } catch {
+      // Ignore storage access errors
+    }
 
-    const savedChat = loadStoredChat(restId);
-    const savedDraft = loadStoredDraft(restId);
-
-    if (savedChat && savedChat.length > 0) {
-      setMessages(
-        savedChat.slice(-20).map((m) => ({
-          id: m.id,
-          role: m.role,
-          text: m.text,
-          timestamp: m.timestamp,
-          suggestedAction: m.suggestedAction as SuggestedChatAction | undefined,
-        }))
-      );
+    const restoredHistory = loadChatHistory(restId);
+    if (restoredHistory.length > 0) {
+      setMessages(restoredHistory);
     } else {
       setMessages([
         {
@@ -153,10 +181,14 @@ export function CustomerPage({
       ]);
     }
 
+    const savedDraft = localStorage.getItem(`draft_${restId}`);
     if (savedDraft) {
-      setOrderDraft({ ...EMPTY_DRAFT, ...savedDraft });
-    } else {
-      setOrderDraft(EMPTY_DRAFT);
+      try {
+        const parsedDraft = JSON.parse(savedDraft) as OrderDraft;
+        setOrderDraft(sanitizeDraftForStorage({ ...EMPTY_DRAFT, ...parsedDraft }));
+      } catch {
+        setOrderDraft(EMPTY_DRAFT);
+      }
     }
   }, []);
 
@@ -208,18 +240,21 @@ export function CustomerPage({
 
   useEffect(() => {
     if (!bundle) return;
-    if (chatOptOut) {
-      clearStoredChat(bundle.restaurant.id);
-      return;
-    }
-    saveStoredChat(bundle.restaurant.id, messages.slice(-20));
-  }, [bundle, messages, chatOptOut]);
+    saveChatHistory(bundle.restaurant.id, messages);
+  }, [bundle, messages]);
 
   useEffect(() => {
     if (!bundle) return;
-    if (chatOptOut) return;
-    saveStoredDraft(bundle.restaurant.id, orderDraft);
-  }, [bundle, orderDraft, chatOptOut]);
+    try {
+      // Strip PII before persisting cart draft locally
+      localStorage.setItem(
+        `draft_${bundle.restaurant.id}`,
+        JSON.stringify(sanitizeDraftForStorage(orderDraft))
+      );
+    } catch {
+      // Ignore
+    }
+  }, [bundle, orderDraft]);
 
   useEffect(() => {
     try {
@@ -238,6 +273,16 @@ export function CustomerPage({
     setFavoriteIds((prev) =>
       prev.includes(itemId) ? prev.filter((id) => id !== itemId) : [...prev, itemId]
     );
+  };
+
+  const handleToggleChatOptOut = (nextOptOut: boolean) => {
+    setChatOptOutState(nextOptOut);
+    setChatOptOut(nextOptOut, bundle?.restaurant.id);
+    if (nextOptOut) {
+      showToast('تم تفعيل عدم حفظ سجل المحادثة محلياً وحذف السجل السابق.');
+    } else {
+      showToast('تم تفعيل الحفظ المؤقت للمحادثة (٢٤ ساعة مع إزالة البيانات الشخصية).');
+    }
   };
 
   const handleAddConfiguredItem = (entry: OrderDraftItem) => {
@@ -292,7 +337,9 @@ export function CustomerPage({
   };
 
   const handleQuickAddItem = (item: MenuItem) => {
-    if (!item.isAvailable || item.stockQuantity <= 0) return;
+    if (!item.isAvailable || (typeof item.stockQuantity === 'number' && item.stockQuantity <= 0)) {
+      return;
+    }
     const defaultSize = item.sizes?.find((s) => s.isDefault) ?? item.sizes?.[0];
     handleAddConfiguredItem({
       itemId: item.id,
@@ -328,7 +375,11 @@ export function CustomerPage({
 
     for (const oi of pastOrder.items) {
       const catalogItem = catalogMap.get(oi.itemId);
-      if (!catalogItem || !catalogItem.isAvailable || catalogItem.stockQuantity <= 0) {
+      if (
+        !catalogItem ||
+        !catalogItem.isAvailable ||
+        (typeof catalogItem.stockQuantity === 'number' && catalogItem.stockQuantity <= 0)
+      ) {
         skippedCount += 1;
         continue;
       }
@@ -370,53 +421,24 @@ export function CustomerPage({
     onNavigateRoute('checkout');
   };
 
-  const handleToggleChatOptOut = (nextOptOut: boolean) => {
-    setChatOptOutState(nextOptOut);
-    if (bundle) {
-      setChatOptOut(bundle.restaurant.id, nextOptOut);
-      if (nextOptOut) {
-        showToast('تم إيقاف حفظ المحادثات ومسح السجل المحلي.');
-      } else {
-        showToast('تم تفعيل حفظ المحادثة مؤقتاً (يحذف تلقائياً بعد ٢٤ ساعة).');
-      }
-    }
-  };
-
-  const handleSendMessage = async (text: string, captchaToken?: string) => {
+  const dispatchChatRequest = async (
+    text: string,
+    historyForRequest: ChatMessage[],
+    verification?: ChatVerificationPayload
+  ) => {
     if (!bundle || !isOnline) return;
-
-    const lastMsg = messages[messages.length - 1];
-    const isCaptchaRetry = Boolean(
-      captchaToken && lastMsg?.role === 'user' && lastMsg.text === text
-    );
-    const nextHistory = isCaptchaRetry
-      ? messages
-      : [
-          ...messages,
-          {
-            id: `usr_${Date.now()}`,
-            role: 'user' as const,
-            text,
-            timestamp: new Date().toISOString(),
-          },
-        ];
-
-    if (!isCaptchaRetry) {
-      setMessages(nextHistory);
-    }
-    setChatLoading(true);
-
     try {
       const res = await sendChatMessage({
         restaurantId: bundle.restaurant.id,
         message: text,
-        history: nextHistory.map((m) => ({ role: m.role, text: m.text })),
+        history: historyForRequest.map((m) => ({ role: m.role, text: m.text })),
         orderDraft,
-        captchaToken,
+        sessionId,
+        verification,
       });
 
-      setChatCaptchaRequired(false);
-      setPendingChatMessage(null);
+      setPendingChallenge(null);
+      setPendingRetryMessage(null);
       setOrderDraft(res.updatedDraft);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
@@ -424,13 +446,21 @@ export function CustomerPage({
         text: res.reply,
         timestamp: new Date().toISOString(),
         suggestedAction: res.suggestedAction,
+        appliedChanges: res.appliedChanges,
+        rejectedChanges: res.rejectedChanges,
+        diff: res.diff,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      if (err instanceof ChatApiError && err.captchaRequired) {
-        setChatCaptchaRequired(true);
-        setPendingChatMessage(text);
-        return;
+      if (err instanceof ApiError && err.captchaRequired) {
+        try {
+          const challenge = await fetchChatChallenge(sessionId);
+          setPendingChallenge(challenge);
+          setPendingRetryMessage(text);
+          return;
+        } catch {
+          // Fall through to normal error message
+        }
       }
       const fallbackMsg: ChatMessage = {
         id: `err_${Date.now()}`,
@@ -443,16 +473,45 @@ export function CustomerPage({
         suggestedAction: 'show_whatsapp',
       };
       setMessages((prev) => [...prev, fallbackMsg]);
+    }
+  };
+
+  const handleSendMessage = async (text: string) => {
+    if (!bundle || !isOnline) return;
+    const userMsg: ChatMessage = {
+      id: `usr_${Date.now()}`,
+      role: 'user',
+      text,
+      timestamp: new Date().toISOString(),
+    };
+
+    const nextHistory = [...messages, userMsg];
+    setMessages(nextHistory);
+    setChatLoading(true);
+    try {
+      await dispatchChatRequest(text, nextHistory);
     } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const handleSubmitChallengeVerification = async (verification: ChatVerificationPayload) => {
+    if (!pendingRetryMessage) return;
+    setChallengeSubmitting(true);
+    setChatLoading(true);
+    try {
+      await dispatchChatRequest(pendingRetryMessage, messages, verification);
+    } finally {
+      setChallengeSubmitting(false);
       setChatLoading(false);
     }
   };
 
   const handleResetChat = () => {
     if (!bundle) return;
-    clearStoredChat(bundle.restaurant.id);
-    setChatCaptchaRequired(false);
-    setPendingChatMessage(null);
+    clearChatHistory(bundle.restaurant.id);
+    setPendingChallenge(null);
+    setPendingRetryMessage(null);
     setMessages([
       {
         id: `welcome_${Date.now()}`,
@@ -463,20 +522,18 @@ export function CustomerPage({
     ]);
   };
 
-  const handleOrderConfirmed = (order: Order, whatsappUrl: string) => {
-    setConfirmedOrderState({ order, whatsappUrl });
+  const handleOrderConfirmed = (order: Order, whatsappUrl: string, orderToken?: string) => {
+    setConfirmedOrderState({ order, whatsappUrl, orderToken });
     setOrderDraft(EMPTY_DRAFT);
-    // Strip PII (phone, address, notes) before persisting order history in localStorage
-    const sanitizedOrder: Order = {
-      ...order,
-      customerPhone: '',
-      customerAddress: '',
-      notes: '',
-    };
-    const nextHistory = [sanitizedOrder, ...localOrderHistory].slice(0, 20);
+    const nextHistory = [order, ...localOrderHistory].slice(0, 20);
     setLocalOrderHistory(nextHistory);
     try {
       localStorage.setItem(ORDER_HISTORY_KEY, JSON.stringify(nextHistory));
+      if (orderToken) {
+        const nextTokens = { ...orderTokens, [order.orderNumber]: orderToken };
+        setOrderTokens(nextTokens);
+        localStorage.setItem(ORDER_TOKENS_KEY, JSON.stringify(nextTokens));
+      }
     } catch {
       // Ignore
     }
@@ -564,6 +621,12 @@ export function CustomerPage({
   }
 
   const { restaurant, categories, items, deliveryZones, branches, activeCoupons } = bundle;
+  const resolvedTrackOrderNumber =
+    initialTrackOrderNumber || localOrderHistory[0]?.orderNumber || '';
+  const resolvedTrackOrderToken =
+    initialTrackOrderToken ||
+    (resolvedTrackOrderNumber ? orderTokens[resolvedTrackOrderNumber] : '') ||
+    '';
 
   return (
     <div className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] text-[#18221D] dark:text-[#ECF3EF] flex flex-col">
@@ -588,13 +651,18 @@ export function CustomerPage({
           if (nextRoute === 'checkout') {
             setConfirmedOrderState(null);
           }
+          if (nextRoute === 'track' && localOrderHistory[0]?.orderNumber) {
+            const firstNum = localOrderHistory[0].orderNumber;
+            onNavigateRoute('track', firstNum, orderTokens[firstNum]);
+            return;
+          }
           onNavigateRoute(nextRoute);
         }}
         onNavigateAdmin={onNavigateAdmin}
       />
 
       {(!isOnline || isUsingCachedBundle) && (
-        <div className="bg-amber-700 text-white px-4 py-2 text-xs font-bold flex items-center justify-center gap-2 text-center">
+        <div className="bg-amber-600 text-white px-4 py-2 text-xs font-bold flex items-center justify-center gap-2 text-center">
           <WifiOff className="w-4 h-4 shrink-0" />
           <span>
             أنت تتصفح آخر نسخة محفوظة من القائمة (وضع القراءة بدون إنترنت) — إرسال الطلبات متوقف
@@ -692,9 +760,14 @@ export function CustomerPage({
             isLoading={chatLoading}
             isOnline={isOnline}
             chatOptOut={chatOptOut}
-            captchaRequired={chatCaptchaRequired}
-            pendingMessage={pendingChatMessage}
             onToggleChatOptOut={handleToggleChatOptOut}
+            pendingChallenge={pendingChallenge}
+            challengeSubmitting={challengeSubmitting}
+            onSubmitChallengeVerification={handleSubmitChallengeVerification}
+            onCancelChallenge={() => {
+              setPendingChallenge(null);
+              setPendingRetryMessage(null);
+            }}
             onSendMessage={handleSendMessage}
             onResetChat={handleResetChat}
             onQuickAddItem={handleQuickAddItem}
@@ -729,14 +802,15 @@ export function CustomerPage({
               onNavigateRoute('menu');
             }}
             onGoMenu={() => onNavigateRoute('menu')}
-            onTrackOrder={(orderToken) => onNavigateRoute('track', orderToken)}
+            onTrackOrder={(ordNum, ordTok) => onNavigateRoute('track', ordNum, ordTok)}
           />
         )}
 
         {route === 'track' && (
           <OrderTrackingView
             restaurant={restaurant}
-            initialOrderToken={initialTrackOrderToken || localOrderHistory[0]?.orderToken}
+            initialOrderNumber={resolvedTrackOrderNumber}
+            initialOrderToken={resolvedTrackOrderToken}
           />
         )}
 
@@ -747,12 +821,13 @@ export function CustomerPage({
             items={items}
             favoriteIds={favoriteIds}
             localOrderHistory={localOrderHistory}
+            orderTokens={orderTokens}
             onToggleFavorite={handleToggleFavorite}
             onSelectItemDetails={(it) => {
               setEditingCartLine(null);
               setSelectedProductModal(it);
             }}
-            onTrackOrder={(orderToken) => onNavigateRoute('track', orderToken)}
+            onTrackOrder={(ordNum, ordTok) => onNavigateRoute('track', ordNum, ordTok)}
             onReorder={handleReorder}
             onGoMenu={() => onNavigateRoute('menu')}
           />
@@ -834,4 +909,3 @@ export function CustomerPage({
     </div>
   );
 }
-

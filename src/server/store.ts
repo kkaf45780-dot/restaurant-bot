@@ -27,6 +27,10 @@ import {
   INITIAL_ORDERS,
   INITIAL_RESTAURANT,
 } from '../data/restaurant.ts';
+import {
+  isValidRestaurantIdOrSlug,
+  resolveExactRestaurantBundle,
+} from './publicSanitizer.ts';
 import type {
   ActivityLog,
   AdminNotification,
@@ -113,7 +117,16 @@ function migrateLocalDb(rawDb: Partial<LocalDatabaseSchema>): {
   let changed = false;
   const seed = getInitialDb();
 
-  const restaurants = rawDb.restaurants?.length ? rawDb.restaurants : seed.restaurants;
+  const restaurants = (rawDb.restaurants?.length ? rawDb.restaurants : seed.restaurants).map(
+    (r) => ({
+      ...r,
+      aiSettings: {
+        ...r.aiSettings,
+        aiOrderIntake:
+          r.aiSettings?.aiOrderIntake ?? r.aiSettings?.allowedTopics?.orderIntake ?? true,
+      },
+    })
+  );
   if (!rawDb.restaurants?.length) changed = true;
 
   const categories = rawDb.categories?.length ? rawDb.categories : seed.categories;
@@ -325,41 +338,46 @@ function mapSupabaseOrder(row: Record<string, unknown>): Order {
   };
 }
 
-export async function getRestaurantBundle(
+export async function findRestaurantBundle(
   restaurantId: string = DEFAULT_RESTAURANT_ID
-): Promise<RestaurantBundle> {
+): Promise<RestaurantBundle | null> {
+  if (!isValidRestaurantIdOrSlug(restaurantId)) {
+    return null;
+  }
+
   const supabase = getSupabaseAdminClient();
   if (supabase) {
     try {
       const { data: restRow, error: restErr } = await supabase
         .from('restaurants')
         .select('*')
-        .eq('id', restaurantId)
+        .or(`id.eq.${restaurantId},slug.eq.${restaurantId}`)
         .maybeSingle();
 
       if (!restErr && restRow) {
+        const targetId = String(restRow.id);
         const [{ data: cats }, { data: items }, { data: zones }, { data: branches }, { data: coupons }] =
           await Promise.all([
             supabase
               .from('menu_categories')
               .select('*')
-              .eq('restaurant_id', restaurantId)
+              .eq('restaurant_id', targetId)
               .order('sort_order', { ascending: true }),
             supabase
               .from('menu_items')
               .select('*')
-              .eq('restaurant_id', restaurantId)
+              .eq('restaurant_id', targetId)
               .order('sort_order', { ascending: true }),
-            supabase.from('delivery_zones').select('*').eq('restaurant_id', restaurantId),
-            supabase.from('branches').select('*').eq('restaurant_id', restaurantId),
+            supabase.from('delivery_zones').select('*').eq('restaurant_id', targetId),
+            supabase.from('branches').select('*').eq('restaurant_id', targetId),
             supabase
               .from('coupons')
               .select('*')
-              .eq('restaurant_id', restaurantId)
+              .eq('restaurant_id', targetId)
               .eq('is_active', true),
           ]);
 
-        return {
+        const bundle: RestaurantBundle = {
           restaurant: mapSupabaseRestaurant(restRow),
           categories: (cats ?? []).map((c) => ({
             id: c.id,
@@ -420,6 +438,10 @@ export async function getRestaurantBundle(
             applicableItemIds: cp.applicable_item_ids ?? [],
           })),
         };
+        return resolveExactRestaurantBundle(bundle, restaurantId);
+      }
+      if (!restErr && !restRow && restaurantId !== DEFAULT_RESTAURANT_ID) {
+        return null;
       }
     } catch (err) {
       console.error('Supabase read error, falling back to local store:', err);
@@ -427,9 +449,11 @@ export async function getRestaurantBundle(
   }
 
   const db = readLocalDb();
-  const restaurant =
-    db.restaurants.find((r) => r.id === restaurantId || r.slug === restaurantId) ??
-    db.restaurants[0];
+  const restaurant = db.restaurants.find(
+    (r) => r.id === restaurantId || r.slug === restaurantId
+  );
+  if (!restaurant) return null;
+
   const targetId = restaurant.id;
 
   return {
@@ -444,6 +468,16 @@ export async function getRestaurantBundle(
     branches: db.branches.filter((b) => b.restaurantId === targetId),
     activeCoupons: db.coupons.filter((c) => c.restaurantId === targetId && c.isActive),
   };
+}
+
+export async function getRestaurantBundle(
+  restaurantId: string = DEFAULT_RESTAURANT_ID
+): Promise<RestaurantBundle> {
+  const found = await findRestaurantBundle(restaurantId);
+  if (!found) {
+    throw new Error('RESTAURANT_NOT_FOUND');
+  }
+  return found;
 }
 
 export async function updateRestaurant(
@@ -787,7 +821,7 @@ export async function incrementCouponUsage(restaurantId: string, code: string): 
     (c) => c.restaurantId === restaurantId && c.code.toUpperCase() === upper
   );
   if (idx >= 0) {
-    db.coupons[idx] = { ...db.coupons[idx], usedCount: db.coupons[idx].usedCount + 1 };
+    db.coupons[idx] = { ...db.coupons[idx], usedCount: (db.coupons[idx].usedCount ?? 0) + 1 };
     writeLocalDb(db);
   }
 }
@@ -965,7 +999,8 @@ export async function adjustItemStock(params: {
   db.inventoryMovements.unshift(movement);
   db.inventoryMovements = db.inventoryMovements.slice(0, 120);
 
-  if (nextQty <= updatedItem.lowStockThreshold && prevQty > updatedItem.lowStockThreshold) {
+  const lowStockThreshold = updatedItem.lowStockThreshold ?? 8;
+  if (nextQty <= lowStockThreshold && prevQty > lowStockThreshold) {
     db.notifications.unshift({
       id: `notif_stock_${Date.now()}`,
       restaurantId,

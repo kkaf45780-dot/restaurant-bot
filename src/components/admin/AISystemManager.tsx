@@ -22,14 +22,37 @@ export function AISettingsSection({
   configStatus,
   onSave,
 }: AISettingsSectionProps) {
-  const [ai, setAi] = useState<AISettings>(restaurant.aiSettings);
+  const defaultTopics = {
+    menuAndPrices: true,
+    workingHours: true,
+    deliveryZones: true,
+    orderIntake: true,
+    ...(restaurant.aiSettings.allowedTopics ?? {}),
+  };
+  const [ai, setAi] = useState<AISettings>({
+    enabled: restaurant.aiSettings.enabled,
+    aiOrderIntake: restaurant.aiSettings.aiOrderIntake ?? defaultTopics.orderIntake,
+    model: restaurant.aiSettings.model ?? 'gemini-4-hydrogen',
+    welcomeMessage: restaurant.aiSettings.welcomeMessage,
+    tone: restaurant.aiSettings.tone ?? 'friendly_egyptian',
+    allowedTopics: defaultTopics,
+    customInstructions: restaurant.aiSettings.customInstructions ?? '',
+  });
   const [saving, setSaving] = useState(false);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     try {
-      await onSave({ aiSettings: ai });
+      await onSave({
+        aiSettings: {
+          ...ai,
+          allowedTopics: {
+            ...(ai.allowedTopics ?? defaultTopics),
+            orderIntake: ai.aiOrderIntake ?? ai.allowedTopics?.orderIntake ?? true,
+          },
+        },
+      });
     } finally {
       setSaving(false);
     }
@@ -72,13 +95,42 @@ export function AISettingsSection({
           </button>
         </div>
 
+        <div className="flex items-center justify-between pb-4 border-b border-[#1B4D3E]/10">
+          <div>
+            <p className="text-sm font-bold text-[#18221D]">استلام وتعديل الطلبات عبر المحادثة (aiOrderIntake)</p>
+            <p className="text-xs text-[#5C6B63]">
+              عند التعطيل، يرد الموظف الذكي على الاستفسارات فقط دون إضافة أصناف للسلة.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              setAi((prev) => ({
+                ...prev,
+                aiOrderIntake: !(prev.aiOrderIntake ?? true),
+                allowedTopics: {
+                  ...(prev.allowedTopics ?? defaultTopics),
+                  orderIntake: !(prev.aiOrderIntake ?? true),
+                },
+              }))
+            }
+            className={`min-h-[40px] px-4 rounded-xl text-xs font-bold cursor-pointer ${
+              (ai.aiOrderIntake ?? true)
+                ? 'bg-[#DCFCE7] text-[#166534]'
+                : 'bg-[#FEF3C7] text-[#92400E]'
+            }`}
+          >
+            {(ai.aiOrderIntake ?? true) ? 'مفعّل' : 'للاستفسارات فقط'}
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs font-bold text-[#5C6B63] mb-1">
               نموذج Gemini المستخدم
             </label>
             <select
-              value={ai.model}
+              value={ai.model ?? 'gemini-4-hydrogen'}
               onChange={(e) =>
                 setAi((prev) => ({
                   ...prev,
@@ -96,7 +148,7 @@ export function AISettingsSection({
           <div>
             <label className="block text-xs font-bold text-[#5C6B63] mb-1">أسلوب الرد</label>
             <select
-              value={ai.tone}
+              value={ai.tone ?? 'friendly_egyptian'}
               onChange={(e) =>
                 setAi((prev) => ({ ...prev, tone: e.target.value as AITone }))
               }
@@ -137,17 +189,21 @@ export function AISettingsSection({
                 <input
                   type="checkbox"
                   checked={
-                    ai.allowedTopics[topic.key as keyof AISettings['allowedTopics']]
+                    (ai.allowedTopics ?? defaultTopics)[
+                      topic.key as keyof NonNullable<AISettings['allowedTopics']>
+                    ]
                   }
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const checked = e.target.checked;
                     setAi((prev) => ({
                       ...prev,
+                      ...(topic.key === 'orderIntake' ? { aiOrderIntake: checked } : {}),
                       allowedTopics: {
-                        ...prev.allowedTopics,
-                        [topic.key]: e.target.checked,
+                        ...(prev.allowedTopics ?? defaultTopics),
+                        [topic.key]: checked,
                       },
-                    }))
-                  }
+                    }));
+                  }}
                   className="w-4 h-4 accent-[#1B4D3E]"
                 />
                 <span className="text-xs font-bold text-[#18221D]">{topic.label}</span>
@@ -162,7 +218,7 @@ export function AISettingsSection({
           </label>
           <textarea
             rows={2}
-            value={ai.customInstructions}
+            value={ai.customInstructions ?? ''}
             onChange={(e) => setAi((prev) => ({ ...prev, customInstructions: e.target.value }))}
             className="w-full p-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
           />

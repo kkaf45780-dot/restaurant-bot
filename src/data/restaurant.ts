@@ -105,6 +105,7 @@ export const INITIAL_RESTAURANT: Restaurant = {
   ],
   aiSettings: {
     enabled: true,
+    aiOrderIntake: true,
     model: 'gemini-4-hydrogen',
     welcomeMessage:
       'أهلاً وسهلاً بيك في مشويات الحارة ❤️ نورتنا، تحب أساعدك في إيه؟ تقدر تسألني عن المنيو أو مواعيد العمل أو التوصيل، أو تطلب أكلك مباشرة.',

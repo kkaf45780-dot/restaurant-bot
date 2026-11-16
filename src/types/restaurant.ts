@@ -59,8 +59,8 @@ export interface MenuItem {
   isAvailable: boolean;
   sortOrder: number;
   isPopular?: boolean;
-  stockQuantity: number;
-  lowStockThreshold: number;
+  stockQuantity?: number;
+  lowStockThreshold?: number;
   sizes: ProductSize[];
   extras: ProductExtra[];
 }
@@ -96,8 +96,8 @@ export interface Coupon {
   maxDiscountAmount?: number;
   validFrom: string; // YYYY-MM-DD
   validUntil: string; // YYYY-MM-DD
-  usageLimit: number;
-  usedCount: number;
+  usageLimit?: number;
+  usedCount?: number;
   isActive: boolean;
   applicableCategoryIds?: string[];
   applicableItemIds?: string[];
@@ -253,11 +253,12 @@ export type AIModelId = (typeof ALLOWED_AI_MODELS)[number];
 
 export interface AISettings {
   enabled: boolean;
-  model: AIModelId;
+  aiOrderIntake?: boolean;
+  model?: AIModelId;
   welcomeMessage: string;
-  tone: AITone;
-  allowedTopics: AIAllowedTopics;
-  customInstructions: string;
+  tone?: AITone;
+  allowedTopics?: AIAllowedTopics;
+  customInstructions?: string;
 }
 
 export interface SystemSettings {
@@ -328,6 +329,91 @@ export interface OrderDraft {
   notes: string;
 }
 
+export type ToolCall =
+  | {
+      name: 'add_item';
+      itemId: string;
+      quantity?: number;
+      selectedSizeId?: string;
+      selectedExtraIds?: string[];
+      itemNotes?: string;
+    }
+  | {
+      name: 'set_quantity';
+      itemId: string;
+      selectedSizeId?: string;
+      quantity: number;
+    }
+  | {
+      name: 'set_size';
+      itemId: string;
+      fromSizeId?: string;
+      selectedSizeId: string;
+    }
+  | {
+      name: 'add_extra';
+      itemId: string;
+      selectedSizeId?: string;
+      extraId: string;
+    }
+  | {
+      name: 'remove_extra';
+      itemId: string;
+      selectedSizeId?: string;
+      extraId: string;
+    }
+  | {
+      name: 'remove_item';
+      itemId: string;
+      selectedSizeId?: string;
+    }
+  | {
+      name: 'set_fulfillment';
+      fulfillmentType: FulfillmentType;
+      deliveryZoneId?: string;
+      branchId?: string;
+    }
+  | {
+      name: 'set_customer';
+      customerName?: string;
+      customerPhone?: string;
+      customerAddress?: string;
+      notes?: string;
+      deliveryZoneId?: string;
+      branchId?: string;
+    }
+  | {
+      name: 'apply_coupon';
+      couponCode: string;
+    }
+  | {
+      name: 'remove_coupon';
+    };
+
+export interface OrderDraftSnapshotLine {
+  itemId: string;
+  name: string;
+  sizeLabel?: string;
+  extrasLabels: string[];
+  quantity: number;
+  lineTotal: number;
+}
+
+export interface OrderDraftDiff {
+  before: {
+    items: OrderDraftSnapshotLine[];
+    total: number;
+    fulfillmentType: FulfillmentType;
+    couponCode?: string;
+  };
+  after: {
+    items: OrderDraftSnapshotLine[];
+    total: number;
+    fulfillmentType: FulfillmentType;
+    couponCode?: string;
+  };
+}
+
 export type SuggestedChatAction =
   | 'none'
   | 'show_menu'
@@ -342,6 +428,28 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   suggestedAction?: SuggestedChatAction;
+  appliedChanges?: string[];
+  rejectedChanges?: string[];
+  diff?: OrderDraftDiff;
+}
+
+export interface ChatVerificationPayload {
+  mode: 'turnstile' | 'hmac';
+  token: string;
+  answer?: string;
+}
+
+export interface ChatChallengeResponse {
+  mode: 'turnstile' | 'hmac';
+  siteKey?: string;
+  challengeToken?: string;
+  question?: string;
+  expiresAt?: string;
+}
+
+export interface PublicConfigStatus {
+  ok: boolean;
+  version: string;
 }
 
 export interface PublicConfigStatus {

@@ -731,7 +731,9 @@ export function MenuManager({
                 const catName =
                   categories.find((c) => c.id === item.categoryId)?.name ?? '—';
                 const fullIndex = items.findIndex((i) => i.id === item.id);
-                const lowStock = item.stockQuantity <= item.lowStockThreshold;
+                const stockQty = item.stockQuantity ?? 0;
+                const lowThreshold = item.lowStockThreshold ?? 8;
+                const lowStock = stockQty <= lowThreshold;
                 return (
                   <tr key={item.id} className="hover:bg-[#F7F3E9]/50">
                     <td className="py-3 px-4">
@@ -761,7 +763,7 @@ export function MenuManager({
                             : 'bg-[#F3F4F2] text-[#35443C]'
                         }`}
                       >
-                        {item.stockQuantity} وحدة
+                        {item.stockQuantity ?? 0} وحدة
                       </span>
                     </td>
                     <td className="py-3 px-4">

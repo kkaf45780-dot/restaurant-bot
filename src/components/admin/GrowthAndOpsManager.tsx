@@ -79,7 +79,7 @@ export function InventorySection({
           >
             {items.map((it) => (
               <option key={it.id} value={it.id}>
-                {it.name} (الحالي: {it.stockQuantity})
+                {it.name} (الحالي: {it.stockQuantity ?? 0})
               </option>
             ))}
           </select>
@@ -131,7 +131,9 @@ export function InventorySection({
               </thead>
               <tbody className="divide-y divide-[#176B45]/10">
                 {items.map((it) => {
-                  const isLow = it.stockQuantity <= it.lowStockThreshold;
+                  const stockQty = it.stockQuantity ?? 0;
+                  const lowThreshold = it.lowStockThreshold ?? 8;
+                  const isLow = stockQty <= lowThreshold;
                   return (
                     <tr key={it.id}>
                       <td className="py-3 px-4 font-bold text-[#18221D]">{it.name}</td>
@@ -142,7 +144,7 @@ export function InventorySection({
                           }`}
                         >
                           {isLow && <AlertTriangle className="w-3 h-3" />}
-                          {it.stockQuantity}
+                          {stockQty}
                         </span>
                       </td>
                       <td className="py-3 px-4">
@@ -368,7 +370,7 @@ export function CouponsSection({
                     {formatCurrency(cp.minOrderAmount, currency)}
                   </td>
                   <td className="py-3.5 px-4 text-xs tabular-nums">
-                    {cp.usedCount} / {cp.usageLimit || '∞'}
+                    {cp.usedCount ?? 0} / {cp.usageLimit || '∞'}
                   </td>
                   <td className="py-3.5 px-4">
                     <button

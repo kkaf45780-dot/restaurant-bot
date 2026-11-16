@@ -3,14 +3,67 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Suspense, lazy, useEffect, useState } from 'react';
-import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import { Component, Suspense, lazy, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
+import { UpdatePrompt } from './components/UpdatePrompt.tsx';
 import type { CustomerRoute } from './components/customer/CustomerNavbar.tsx';
 import { CustomerPage } from './pages/CustomerPage.tsx';
 
 const AdminPage = lazy(() =>
   import('./pages/AdminPage.tsx').then((m) => ({ default: m.AdminPage }))
 );
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Unhandled UI error:', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          dir="rtl"
+          className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] flex items-center justify-center p-6"
+        >
+          <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-red-200 dark:border-red-800 p-8 text-center max-w-md w-full space-y-4 shadow-sm">
+            <h1 className="text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
+              حدث خطأ غير متوقع
+            </h1>
+            <p className="text-sm text-[#5C6B63] dark:text-[#A3B8AE]">
+              نعتذر عن هذا العطل المؤقت. يمكنك إعادة المحاولة أو تحديث الصفحة للعودة إلى التطبيق.
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => this.setState({ hasError: false })}
+                className="min-h-[44px] px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-bold cursor-pointer"
+              >
+                إعادة المحاولة
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="min-h-[44px] px-5 rounded-xl border border-[#176B45]/25 text-[#104B34] dark:text-[#ECF3EF] text-sm font-bold hover:bg-[#F7F3E9] dark:hover:bg-[#192822] cursor-pointer"
+              >
+                تحديث الصفحة
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function AdminLoadingFallback() {
   return (
@@ -32,53 +85,49 @@ function AdminLoadingFallback() {
 
 function parseLocation(): {
   isAdmin: boolean;
-  isNotFound: boolean;
   customerRoute: CustomerRoute;
-  trackOrderToken?: string;
+  trackOrder?: string;
+  trackToken?: string;
 } {
-  const rawPath = window.location.pathname;
-  const path = rawPath === '/' ? '/' : rawPath.replace(/\/+$/, '');
+  const path = window.location.pathname;
   const params = new URLSearchParams(window.location.search);
 
-  if (path === '/admin' || path.startsWith('/admin/')) {
-    return { isAdmin: true, isNotFound: false, customerRoute: 'home' };
+  if (path.startsWith('/admin')) {
+    return { isAdmin: true, customerRoute: 'home' };
   }
-  if (path === '/' || path === '') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'home' };
+  if (path.startsWith('/menu')) {
+    return { isAdmin: false, customerRoute: 'menu' };
   }
-  if (path === '/menu') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'menu' };
+  if (path.startsWith('/chat')) {
+    return { isAdmin: false, customerRoute: 'chat' };
   }
-  if (path === '/chat') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'chat' };
+  if (path.startsWith('/checkout')) {
+    return { isAdmin: false, customerRoute: 'checkout' };
   }
-  if (path === '/checkout') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'checkout' };
-  }
-  if (path === '/track') {
+  if (path.startsWith('/track')) {
     return {
       isAdmin: false,
-      isNotFound: false,
       customerRoute: 'track',
-      trackOrderToken: params.get('token') || params.get('orderToken') || undefined,
+      trackOrder: params.get('order') || undefined,
+      trackToken: params.get('token') || undefined,
     };
   }
-  if (path === '/orders') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'orders' };
+  if (path.startsWith('/orders')) {
+    return { isAdmin: false, customerRoute: 'orders' };
   }
-  if (path === '/favorites') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'favorites' };
+  if (path.startsWith('/favorites')) {
+    return { isAdmin: false, customerRoute: 'favorites' };
   }
-  if (path === '/about') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'about' };
+  if (path.startsWith('/about')) {
+    return { isAdmin: false, customerRoute: 'about' };
   }
-  if (path === '/privacy') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'privacy' };
+  if (path.startsWith('/privacy')) {
+    return { isAdmin: false, customerRoute: 'privacy' };
   }
-  if (path === '/terms') {
-    return { isAdmin: false, isNotFound: false, customerRoute: 'terms' };
+  if (path.startsWith('/terms')) {
+    return { isAdmin: false, customerRoute: 'terms' };
   }
-  return { isAdmin: false, isNotFound: true, customerRoute: 'home' };
+  return { isAdmin: false, customerRoute: 'home' };
 }
 
 const ROUTE_TO_PATH: Record<CustomerRoute, string> = {
@@ -103,16 +152,22 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  const navigateCustomerRoute = (route: CustomerRoute, trackOrderToken?: string) => {
+  const navigateCustomerRoute = (
+    route: CustomerRoute,
+    trackOrder?: string,
+    trackToken?: string
+  ) => {
     const base = ROUTE_TO_PATH[route];
-    const nextUrl =
-      route === 'track' && trackOrderToken
-        ? `${base}?token=${encodeURIComponent(trackOrderToken)}`
-        : base;
+    let nextUrl = base;
+    if (route === 'track' && trackOrder) {
+      const qs = new URLSearchParams({ order: trackOrder });
+      if (trackToken) qs.set('token', trackToken);
+      nextUrl = `${base}?${qs.toString()}`;
+    }
     if (window.location.pathname + window.location.search !== nextUrl) {
       window.history.pushState({}, '', nextUrl);
     }
-    setLoc({ isAdmin: false, isNotFound: false, customerRoute: route, trackOrderToken });
+    setLoc({ isAdmin: false, customerRoute: route, trackOrder, trackToken });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -120,33 +175,9 @@ export default function App() {
     if (window.location.pathname !== '/admin') {
       window.history.pushState({}, '', '/admin');
     }
-    setLoc({ isAdmin: true, isNotFound: false, customerRoute: 'home' });
+    setLoc({ isAdmin: true, customerRoute: 'home' });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
-
-  if (loc.isNotFound) {
-    return (
-      <div
-        dir="rtl"
-        className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] text-[#18221D] dark:text-[#ECF3EF] flex items-center justify-center p-6"
-      >
-        <main className="max-w-md w-full bg-white dark:bg-[#14201B] border border-[#E5E0D5] dark:border-[#2A3F35] rounded-2xl p-8 text-center shadow-sm space-y-4">
-          <h1 className="text-4xl font-extrabold text-[#104B34] dark:text-[#4ADE80]">404</h1>
-          <p className="text-lg font-extrabold">الصفحة غير موجودة</p>
-          <p className="text-sm text-[#4A5850] dark:text-[#A3B8AE]">
-            الرابط الذي طلبته غير متوفر في موقع مشويات الحارة.
-          </p>
-          <button
-            type="button"
-            onClick={() => navigateCustomerRoute('home')}
-            className="min-h-[44px] px-6 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-bold cursor-pointer"
-          >
-            العودة للرئيسية
-          </button>
-        </main>
-      </div>
-    );
-  }
 
   return (
     <ErrorBoundary>
@@ -157,11 +188,13 @@ export default function App() {
       ) : (
         <CustomerPage
           route={loc.customerRoute}
-          initialTrackOrderToken={loc.trackOrderToken}
+          initialTrackOrderNumber={loc.trackOrder}
+          initialTrackOrderToken={loc.trackToken}
           onNavigateRoute={navigateCustomerRoute}
           onNavigateAdmin={navigateAdmin}
         />
       )}
+      <UpdatePrompt />
     </ErrorBoundary>
   );
 }

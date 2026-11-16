@@ -58,8 +58,11 @@ export function HomepageView({
   const [heroImgBroken, setHeroImgBroken] = useState(false);
   const heroSrc = resolveAssetUrl(HERO_PLATTER_IMAGE_PATH);
 
+  const isItemAvailable = (i: MenuItem) =>
+    i.isAvailable && (typeof i.stockQuantity !== 'number' || i.stockQuantity > 0);
+
   const popularItems = items
-    .filter((i) => i.isAvailable && i.stockQuantity > 0 && (i.isPopular || i.sortOrder <= 6))
+    .filter((i) => isItemAvailable(i) && (i.isPopular || i.sortOrder <= 6))
     .slice(0, 6);
 
   const categoryRepresentativeImage = (catId: string): string => {
@@ -75,7 +78,7 @@ export function HomepageView({
   return (
     <div className="space-y-12 pb-16">
       {/* Hero Section matching Restaurant_homepage_desktop_layout */}
-      <section className="bg-[#F7F3E9] dark:bg-[#0E1713] border-b border-[#176B45]/10 dark:border-[#2A3F35]">
+      <section className="relative overflow-hidden bg-[#F7F3E9] dark:bg-[#0E1713] border-b border-[#176B45]/10 dark:border-[#2A3F35]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-10 lg:py-16 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
           {/* Right Column in RTL: Hero Headline & CTAs */}
           <div className="lg:col-span-6 space-y-6 text-right">
@@ -84,7 +87,7 @@ export function HomepageView({
               <span>{restaurant.name} · استقبال ذكي على مدار ساعات العمل</span>
             </div>
 
-            <h1 className="text-4xl sm:text-5xl font-extrabold text-[#104B34] dark:text-[#ECF3EF] leading-[1.22]">
+            <h1 className="text-3xl sm:text-5xl font-extrabold text-[#104B34] dark:text-[#ECF3EF] leading-[1.22]">
               أهلاً بك!
               <span className="block mt-1">ماذا تحب أن تطلب اليوم؟</span>
             </h1>
@@ -98,7 +101,7 @@ export function HomepageView({
               <button
                 type="button"
                 onClick={onNavigateChat}
-                className="min-h-[50px] px-8 rounded-full bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-extrabold flex items-center gap-2 shadow-sm transition-colors cursor-pointer"
+                className="min-h-[48px] sm:min-h-[50px] px-7 sm:px-8 rounded-full bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-extrabold flex items-center gap-2 shadow-sm transition-colors cursor-pointer"
               >
                 <Bot className="w-4 h-4" />
                 <span>ابدأ الطلب</span>
@@ -107,7 +110,7 @@ export function HomepageView({
               <button
                 type="button"
                 onClick={() => onNavigateMenuCategory('all')}
-                className="min-h-[50px] px-8 rounded-full bg-white hover:bg-[#FAF7F0] text-[#104B34] border-2 border-[#C5A46D] text-sm font-extrabold flex items-center gap-2 transition-colors cursor-pointer"
+                className="min-h-[48px] sm:min-h-[50px] px-7 sm:px-8 rounded-full bg-white dark:bg-[#14201B] hover:bg-[#FAF7F0] dark:hover:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] border-2 border-[#C5A46D] text-sm font-extrabold flex items-center gap-2 transition-colors cursor-pointer"
               >
                 <UtensilsCrossed className="w-4 h-4" />
                 <span>تصفح القائمة</span>
@@ -116,13 +119,13 @@ export function HomepageView({
 
             {/* Active Promo Banner if any coupons exist */}
             {activeCoupons.length > 0 && (
-              <div className="inline-flex flex-wrap items-center gap-2.5 bg-white/90 border border-[#C5A46D]/40 rounded-2xl px-4 py-2.5 text-xs">
-                <Tag className="w-4 h-4 text-[#176B45] shrink-0" />
-                <span className="font-bold text-[#18221D]">عروض اليوم:</span>
-                <span className="font-extrabold text-[#176B45] bg-[#176B45]/10 px-2.5 py-0.5 rounded-lg tracking-wider">
+              <div className="inline-flex flex-wrap items-center gap-2.5 bg-white/90 dark:bg-[#14201B]/95 border border-[#C5A46D]/40 rounded-2xl px-4 py-2.5 text-xs">
+                <Tag className="w-4 h-4 text-[#176B45] dark:text-[#4ADE80] shrink-0" />
+                <span className="font-bold text-[#18221D] dark:text-[#ECF3EF]">عروض اليوم:</span>
+                <span className="font-extrabold text-[#176B45] dark:text-[#4ADE80] bg-[#176B45]/10 dark:bg-[#176B45]/25 px-2.5 py-0.5 rounded-lg tracking-wider">
                   {activeCoupons[0].code}
                 </span>
-                <span className="text-[#5C6B63]">{activeCoupons[0].description}</span>
+                <span className="text-[#5C6B63] dark:text-[#A3B8AE]">{activeCoupons[0].description}</span>
               </div>
             )}
           </div>
@@ -173,26 +176,26 @@ export function HomepageView({
           </button>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
           {categories.map((cat) => {
             const thumb = categoryRepresentativeImage(cat.id);
-            const count = items.filter((i) => i.categoryId === cat.id && i.isAvailable).length;
+            const count = items.filter((i) => i.categoryId === cat.id && isItemAvailable(i)).length;
             return (
               <button
                 key={cat.id}
                 type="button"
                 onClick={() => onNavigateMenuCategory(cat.id)}
-                className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] hover:border-[#176B45]/40 p-4 flex items-center justify-between gap-3 text-right shadow-xs hover:shadow-md transition-all cursor-pointer group"
+                className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] hover:border-[#176B45]/40 p-3 sm:p-4 flex items-center justify-between gap-2.5 sm:gap-3 text-right shadow-xs hover:shadow-md transition-all cursor-pointer group min-w-0"
               >
                 <div className="min-w-0">
-                  <p className="font-extrabold text-sm text-[#18221D] dark:text-[#ECF3EF] group-hover:text-[#176B45] truncate">
+                  <p className="font-extrabold text-xs sm:text-sm text-[#18221D] dark:text-[#ECF3EF] group-hover:text-[#176B45] dark:group-hover:text-[#4ADE80] truncate">
                     {cat.name}
                   </p>
-                  <p className="text-xs text-[#5C6B63] dark:text-[#A3B8AE] mt-0.5 tabular-nums">
+                  <p className="text-[11px] sm:text-xs text-[#5C6B63] dark:text-[#A3B8AE] mt-0.5 tabular-nums">
                     {count} أصناف
                   </p>
                 </div>
-                <div className="w-14 h-14 rounded-full overflow-hidden border-2 border-[#F7F3E9] dark:border-[#2A3F35] shrink-0 bg-[#F7F3E9]">
+                <div className="w-11 h-11 sm:w-14 sm:h-14 rounded-full overflow-hidden border-2 border-[#F7F3E9] dark:border-[#2A3F35] shrink-0 bg-[#F7F3E9] dark:bg-[#0E1713]">
                   <img
                     src={thumb}
                     alt={cat.name}
@@ -308,18 +311,21 @@ export function HomepageView({
       <section className="max-w-7xl mx-auto px-4 sm:px-6">
         <div className="bg-white dark:bg-[#14201B] rounded-3xl border border-[#176B45]/10 dark:border-[#2A3F35] p-6 sm:p-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="space-y-3">
-            <div className="flex items-center gap-2 text-[#104B34] font-extrabold text-lg">
-              <Clock className="w-5 h-5 text-[#176B45]" />
+            <div className="flex items-center gap-2 text-[#104B34] dark:text-[#ECF3EF] font-extrabold text-lg">
+              <Clock className="w-5 h-5 text-[#176B45] dark:text-[#4ADE80]" />
               <span>مواعيد العمل</span>
             </div>
-            <p className="text-xs font-bold text-[#176B45]">
+            <p className="text-xs font-bold text-[#176B45] dark:text-[#4ADE80]">
               الحالة الآن: {hoursStatus.statusLabel} ({hoursStatus.todayHoursText})
             </p>
-            <div className="space-y-1.5 text-xs text-[#35443C]">
+            <div className="space-y-1.5 text-xs text-[#35443C] dark:text-[#D1DFD8]">
               {restaurant.weeklySchedule.map((d) => (
-                <div key={d.day} className="flex justify-between border-b border-[#F3F4F2] pb-1">
+                <div
+                  key={d.day}
+                  className="flex justify-between border-b border-[#F3F4F2] dark:border-[#2A3F35] pb-1"
+                >
                   <span className="font-bold">{d.labelAr}</span>
-                  <span className="tabular-nums text-[#5C6B63]">
+                  <span className="tabular-nums text-[#5C6B63] dark:text-[#A3B8AE]">
                     {d.isClosed
                       ? 'مغلق'
                       : `${formatTimeArabic12h(d.openTime)} - ${formatTimeArabic12h(d.closeTime)}`}
@@ -330,48 +336,52 @@ export function HomepageView({
           </div>
 
           <div className="space-y-3">
-            <div className="flex items-center gap-2 text-[#104B34] font-extrabold text-lg">
-              <Store className="w-5 h-5 text-[#176B45]" />
+            <div className="flex items-center gap-2 text-[#104B34] dark:text-[#ECF3EF] font-extrabold text-lg">
+              <Store className="w-5 h-5 text-[#176B45] dark:text-[#4ADE80]" />
               <span>فروعنا</span>
             </div>
             <div className="space-y-2.5">
               {branches.map((br) => (
                 <div
                   key={br.id}
-                  className="p-3 rounded-xl bg-[#F7F3E9]/70 border border-[#176B45]/10 text-xs space-y-1"
+                  className="p-3 rounded-xl bg-[#F7F3E9]/70 dark:bg-[#0E1713] border border-[#176B45]/10 dark:border-[#2A3F35] text-xs space-y-1"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-extrabold text-[#18221D]">{br.name}</span>
+                    <span className="font-extrabold text-[#18221D] dark:text-[#ECF3EF]">
+                      {br.name}
+                    </span>
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                         br.isOpen
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-neutral-200 text-neutral-700'
+                          ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-800 dark:text-emerald-300'
+                          : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300'
                       }`}
                     >
                       {br.isOpen ? 'مفتوح' : 'مغلق'}
                     </span>
                   </div>
-                  <p className="text-[#5C6B63] flex items-center gap-1">
-                    <MapPin className="w-3.5 h-3.5 text-[#176B45] shrink-0" />
+                  <p className="text-[#5C6B63] dark:text-[#A3B8AE] flex items-center gap-1">
+                    <MapPin className="w-3.5 h-3.5 text-[#176B45] dark:text-[#4ADE80] shrink-0" />
                     <span>{br.address}</span>
                   </p>
-                  <p className="text-[#5C6B63] tabular-nums">{br.hoursText}</p>
+                  <p className="text-[#5C6B63] dark:text-[#A3B8AE] tabular-nums">{br.hoursText}</p>
                 </div>
               ))}
             </div>
           </div>
 
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-[#104B34] font-extrabold text-lg">
-              <Phone className="w-5 h-5 text-[#176B45]" />
+            <div className="flex items-center gap-2 text-[#104B34] dark:text-[#ECF3EF] font-extrabold text-lg">
+              <Phone className="w-5 h-5 text-[#176B45] dark:text-[#4ADE80]" />
               <span>تواصل معنا</span>
             </div>
-            <p className="text-sm text-[#5C6B63] leading-relaxed">{restaurant.description}</p>
+            <p className="text-sm text-[#5C6B63] dark:text-[#A3B8AE] leading-relaxed">
+              {restaurant.description}
+            </p>
             <div className="space-y-2.5 pt-1">
               <a
                 href={`tel:${restaurant.phone}`}
-                className="w-full min-h-[44px] px-4 rounded-xl bg-[#F7F3E9] hover:bg-[#EFE9DC] text-[#104B34] text-sm font-bold flex items-center justify-between transition-colors"
+                className="w-full min-h-[44px] px-4 rounded-xl bg-[#F7F3E9] dark:bg-[#0E1713] hover:bg-[#EFE9DC] dark:hover:bg-[#192822] border border-[#176B45]/10 dark:border-[#2A3F35] text-[#104B34] dark:text-[#4ADE80] text-sm font-bold flex items-center justify-between transition-colors"
               >
                 <span className="flex items-center gap-2">
                   <Phone className="w-4 h-4" />

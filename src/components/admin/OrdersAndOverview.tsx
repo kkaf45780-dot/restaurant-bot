@@ -288,7 +288,7 @@ export function OverviewSection({
                     <span>{it.name}</span>
                   </span>
                   <span className="font-extrabold text-red-700 tabular-nums">
-                    {it.stockQuantity} وحدات متبقية
+                    {it.stockQuantity ?? 0} وحدات متبقية
                   </span>
                 </div>
               ))}

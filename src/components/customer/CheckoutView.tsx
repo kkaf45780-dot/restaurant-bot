@@ -2,7 +2,6 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
-  Copy,
   ExternalLink,
   MapPin,
   Minus,
@@ -45,11 +44,11 @@ interface CheckoutViewProps {
   onUpdateDraft: (updater: (prev: OrderDraft) => OrderDraft) => void;
   onUpdateLineQty: (lineKey: string, nextQty: number) => void;
   onEditCartLine?: (item: MenuItem, line: OrderDraftItem) => void;
-  onOrderConfirmed: (order: Order, whatsappUrl: string) => void;
-  confirmedOrderState: { order: Order; whatsappUrl: string } | null;
+  onOrderConfirmed: (order: Order, whatsappUrl: string, orderToken?: string) => void;
+  confirmedOrderState: { order: Order; whatsappUrl: string; orderToken?: string } | null;
   onStartNewOrder: () => void;
   onGoMenu: () => void;
-  onTrackOrder: (orderNumber: string) => void;
+  onTrackOrder: (orderNumber: string, orderToken?: string) => void;
 }
 
 export function CheckoutView({
@@ -79,7 +78,6 @@ export function CheckoutView({
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [copiedToken, setCopiedToken] = useState(false);
   const [idempotencyKey] = useState(
     () => `idem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   );
@@ -188,7 +186,7 @@ export function CheckoutView({
         notes: draft.notes.trim(),
         idempotencyKey,
       });
-      onOrderConfirmed(res.order, res.whatsappUrl);
+      onOrderConfirmed(res.order, res.whatsappUrl, res.orderToken);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'تعذر تسجيل الطلب حالياً.');
     } finally {
@@ -198,77 +196,57 @@ export function CheckoutView({
 
   // Post-Submission Confirmation Screen
   if (confirmedOrderState) {
-    const { order, whatsappUrl } = confirmedOrderState;
+    const { order, whatsappUrl, orderToken } = confirmedOrderState;
     return (
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10">
-        <div className="bg-white rounded-3xl border border-[#176B45]/20 p-6 sm:p-8 shadow-sm space-y-6">
+        <div className="bg-white dark:bg-[#14201B] rounded-3xl border border-[#176B45]/20 dark:border-[#2A3F35] p-6 sm:p-8 shadow-sm space-y-6">
           <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-[#16A34A]/15 text-[#15803D] flex items-center justify-center shrink-0">
+            <div className="w-12 h-12 rounded-2xl bg-[#16A34A]/15 text-[#15803D] dark:text-[#4ADE80] flex items-center justify-center shrink-0">
               <CheckCircle2 className="w-7 h-7" />
             </div>
             <div>
-              <h1 className="text-xl sm:text-2xl font-extrabold text-[#104B34]">
+              <h1 className="text-xl sm:text-2xl font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
                 تم استلام طلبك بنجاح — رقم #{order.orderNumber}
               </h1>
-              <p className="text-sm text-[#5C6B63] mt-1 leading-relaxed">
+              <p className="text-sm text-[#5C6B63] dark:text-[#A3B8AE] mt-1 leading-relaxed">
                 تنبيه مهم: تم حفظ الطلب في النظام وهو الآن <strong>بانتظار مراجعة وتأكيد المطعم</strong>.
                 للمتابعة السريعة يمكنك إرسال تفاصيل الطلب عبر واتساب أو تتبع الحالة مباشرة.
               </p>
             </div>
           </div>
 
-          <div className="rounded-2xl bg-[#F7F3E9] border border-[#176B45]/10 p-5 space-y-3 text-sm">
-            <div className="flex flex-wrap justify-between gap-2 text-xs text-[#5C6B63]">
+          <div className="rounded-2xl bg-[#F7F3E9] dark:bg-[#0E1713] border border-[#176B45]/10 dark:border-[#2A3F35] p-5 space-y-3 text-sm">
+            <div className="flex flex-wrap justify-between gap-2 text-xs text-[#5C6B63] dark:text-[#A3B8AE]">
               <span>
-                العميل: <strong className="text-[#18221D]">{order.customerName}</strong>
+                العميل: <strong className="text-[#18221D] dark:text-[#ECF3EF]">{order.customerName}</strong>
               </span>
               <span className="tabular-nums">
-                الهاتف: <strong className="text-[#18221D]">{order.customerPhone}</strong>
+                الهاتف: <strong className="text-[#18221D] dark:text-[#ECF3EF]">{order.customerPhone}</strong>
               </span>
             </div>
-            <p className="text-xs text-[#5C6B63]">
+            <p className="text-xs text-[#5C6B63] dark:text-[#A3B8AE]">
               {order.fulfillmentType === 'pickup' ? 'فرع الاستلام: ' : 'العنوان: '}
-              <strong className="text-[#18221D]">{order.customerAddress}</strong>
+              <strong className="text-[#18221D] dark:text-[#ECF3EF]">{order.customerAddress}</strong>
             </p>
-            <div className="border-t border-[#176B45]/10 pt-3 space-y-1.5">
+            <div className="border-t border-[#176B45]/10 dark:border-[#2A3F35] pt-3 space-y-1.5">
               {order.items.map((it, idx) => (
                 <div key={idx} className="flex justify-between text-xs">
-                  <span className="font-bold text-[#18221D]">
+                  <span className="font-bold text-[#18221D] dark:text-[#ECF3EF]">
                     {it.quantity} × {it.name}
                     {it.selectedSizeLabel ? ` (${it.selectedSizeLabel})` : ''}
                   </span>
-                  <span className="font-bold tabular-nums">
+                  <span className="font-bold tabular-nums text-[#18221D] dark:text-[#ECF3EF]">
                     {formatCurrency(it.lineTotal, currencyLabel)}
                   </span>
                 </div>
               ))}
             </div>
-            <div className="border-t border-[#176B45]/10 pt-3 flex justify-between font-extrabold text-base text-[#104B34]">
+            <div className="border-t border-[#176B45]/10 dark:border-[#2A3F35] pt-3 flex justify-between font-extrabold text-base text-[#104B34] dark:text-[#ECF3EF]">
               <span>الإجمالي النهائي</span>
-              <span className="tabular-nums">{formatCurrency(order.total, currencyLabel)}</span>
+              <span className="tabular-nums dark:text-[#4ADE80]">
+                {formatCurrency(order.total, currencyLabel)}
+              </span>
             </div>
-          </div>
-
-          <div className="rounded-2xl bg-[#FAF7F0] border border-[#C5A46D]/40 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-extrabold text-[#104B34]">رمز التتبع الآمن للطلب</p>
-              <p dir="ltr" className="text-xs font-mono text-[#35443C] truncate mt-0.5">
-                {order.orderToken}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                const trackUrl = `${window.location.origin}/track?token=${encodeURIComponent(order.orderToken)}`;
-                navigator.clipboard?.writeText(trackUrl).catch(() => {});
-                setCopiedToken(true);
-                setTimeout(() => setCopiedToken(false), 2500);
-              }}
-              className="min-h-[38px] px-3.5 rounded-xl bg-white border border-[#176B45]/25 text-xs font-bold text-[#104B34] hover:bg-[#F7F3E9] inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              <span>{copiedToken ? 'تم نسخ رابط التتبع' : 'نسخ رابط التتبع'}</span>
-            </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -277,7 +255,7 @@ export function CheckoutView({
                 href={whatsappUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="min-h-[48px] px-5 rounded-xl bg-[#15803D] hover:bg-[#104B34] text-white text-sm font-extrabold flex items-center justify-center gap-2 transition-colors"
+                className="min-h-[48px] px-5 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-extrabold flex items-center justify-center gap-2 transition-colors"
               >
                 <span>إرسال الطلب عبر واتساب</span>
                 <ExternalLink className="w-4 h-4" />
@@ -285,7 +263,7 @@ export function CheckoutView({
             )}
             <button
               type="button"
-              onClick={() => onTrackOrder(order.orderToken)}
+              onClick={() => onTrackOrder(order.orderNumber, orderToken)}
               className="min-h-[48px] px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer transition-colors"
             >
               <PackageCheck className="w-4 h-4" />
@@ -296,7 +274,7 @@ export function CheckoutView({
           <button
             type="button"
             onClick={onStartNewOrder}
-            className="w-full min-h-[42px] rounded-xl border border-[#176B45]/20 hover:bg-[#F7F3E9] text-xs font-bold text-[#104B34] cursor-pointer"
+            className="w-full min-h-[42px] rounded-xl border border-[#176B45]/20 dark:border-[#2A3F35] hover:bg-[#F7F3E9] dark:hover:bg-[#192822] text-xs font-bold text-[#104B34] dark:text-[#ECF3EF] cursor-pointer"
           >
             العودة للقائمة وبدء طلب جديد
           </button>
@@ -451,16 +429,16 @@ export function CheckoutView({
               </div>
 
               {/* Coupon Code Box */}
-              <div className="pt-2 border-t border-[#176B45]/10 space-y-2">
+              <div className="pt-2 border-t border-[#176B45]/10 dark:border-[#2A3F35] space-y-2">
                 <div className="flex flex-col sm:flex-row gap-2">
                   <div className="relative flex-1">
-                    <Tag className="w-4 h-4 text-[#176B45] absolute right-3.5 top-1/2 -translate-y-1/2" />
+                    <Tag className="w-4 h-4 text-[#176B45] dark:text-[#4ADE80] absolute right-3.5 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       value={couponInput}
                       onChange={(e) => setCouponInput(e.target.value)}
                       placeholder="هل لديك كود خصم؟ (مثال: HARA10 أو WELCOME30)"
-                      className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9]/70 border border-[#176B45]/15 text-sm text-[#18221D] uppercase placeholder:normal-case focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                      className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9]/70 dark:bg-[#0E1713] border border-[#176B45]/15 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] uppercase placeholder:normal-case focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                     />
                   </div>
                   <button
@@ -476,7 +454,9 @@ export function CheckoutView({
                 {couponFeedback && (
                   <p
                     className={`text-xs font-bold ${
-                      couponFeedback.type === 'success' ? 'text-emerald-700' : 'text-red-700'
+                      couponFeedback.type === 'success'
+                        ? 'text-emerald-700 dark:text-emerald-400'
+                        : 'text-red-700 dark:text-red-400'
                     }`}
                   >
                     {couponFeedback.text}
@@ -486,12 +466,14 @@ export function CheckoutView({
             </section>
 
             {/* Customer & Delivery Details Card matching Desktop_checkout_website_page_layout */}
-            <section className="bg-white rounded-2xl border border-[#176B45]/15 p-5 sm:p-6 shadow-xs space-y-5">
+            <section className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/15 dark:border-[#2A3F35] p-5 sm:p-6 shadow-xs space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <h2 className="text-lg font-extrabold text-[#104B34]">بيانات العميل والتوصيل</h2>
+                <h2 className="text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
+                  بيانات العميل والتوصيل
+                </h2>
 
                 {/* Fulfillment Type Toggle */}
-                <div className="inline-grid grid-cols-2 gap-1.5 bg-[#F7F3E9] p-1 rounded-xl border border-[#176B45]/15">
+                <div className="inline-grid grid-cols-2 gap-1.5 bg-[#F7F3E9] dark:bg-[#0E1713] p-1 rounded-xl border border-[#176B45]/15 dark:border-[#2A3F35]">
                   <button
                     type="button"
                     onClick={() =>
@@ -503,7 +485,7 @@ export function CheckoutView({
                     className={`min-h-[38px] px-4 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
                       draft.fulfillmentType === 'delivery'
                         ? 'bg-[#104B34] text-white'
-                        : 'text-[#35443C]'
+                        : 'text-[#35443C] dark:text-[#D1DFD8]'
                     }`}
                   >
                     <Truck className="w-3.5 h-3.5" />
@@ -520,7 +502,7 @@ export function CheckoutView({
                     className={`min-h-[38px] px-4 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
                       draft.fulfillmentType === 'pickup'
                         ? 'bg-[#104B34] text-white'
-                        : 'text-[#35443C]'
+                        : 'text-[#35443C] dark:text-[#D1DFD8]'
                     }`}
                   >
                     <Store className="w-3.5 h-3.5" />
@@ -531,7 +513,7 @@ export function CheckoutView({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">
+                  <label className="block text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] mb-1.5">
                     الاسم بالكامل
                   </label>
                   <input
@@ -541,12 +523,12 @@ export function CheckoutView({
                       onUpdateDraft((p) => ({ ...p, customerName: e.target.value }))
                     }
                     placeholder="اكتب اسمك بالكامل"
-                    className="w-full h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                    className="w-full h-11 px-4 rounded-xl bg-white dark:bg-[#0E1713] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">
+                  <label className="block text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] mb-1.5">
                     رقم الهاتف
                   </label>
                   <input
@@ -557,7 +539,7 @@ export function CheckoutView({
                       onUpdateDraft((p) => ({ ...p, customerPhone: e.target.value }))
                     }
                     placeholder="01012345678"
-                    className="w-full h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                    className="w-full h-11 px-4 rounded-xl bg-white dark:bg-[#0E1713] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                   />
                 </div>
               </div>
@@ -565,7 +547,7 @@ export function CheckoutView({
               {draft.fulfillmentType === 'delivery' ? (
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">
+                    <label className="block text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] mb-1.5">
                       منطقة التوصيل
                     </label>
                     <select
@@ -573,7 +555,7 @@ export function CheckoutView({
                       onChange={(e) =>
                         onUpdateDraft((p) => ({ ...p, deliveryZoneId: e.target.value }))
                       }
-                      className="w-full h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                      className="w-full h-11 px-4 rounded-xl bg-white dark:bg-[#0E1713] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                     >
                       <option value="">اختر منطقة التوصيل...</option>
                       {activeZones.map((zone) => (
@@ -585,7 +567,7 @@ export function CheckoutView({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">
+                    <label className="block text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] mb-1.5">
                       العنوان بالتفصيل
                     </label>
                     <input
@@ -595,13 +577,13 @@ export function CheckoutView({
                         onUpdateDraft((p) => ({ ...p, customerAddress: e.target.value }))
                       }
                       placeholder="اسم الشارع، رقم العمارة، الدور، الشقة، وأقرب معلم"
-                      className="w-full h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                      className="w-full h-11 px-4 rounded-xl bg-white dark:bg-[#0E1713] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                     />
                   </div>
                 </div>
               ) : (
                 <div>
-                  <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">
+                  <label className="block text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] mb-1.5">
                     اختر فرع الاستلام (بدون رسوم توصيل)
                   </label>
                   <select
@@ -609,7 +591,7 @@ export function CheckoutView({
                     onChange={(e) =>
                       onUpdateDraft((p) => ({ ...p, branchId: e.target.value }))
                     }
-                    className="w-full h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                    className="w-full h-11 px-4 rounded-xl bg-white dark:bg-[#0E1713] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                   >
                     {openBranches.map((br) => (
                       <option key={br.id} value={br.id}>
@@ -621,7 +603,7 @@ export function CheckoutView({
               )}
 
               <div>
-                <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">
+                <label className="block text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] mb-1.5">
                   ملاحظات الطلب
                 </label>
                 <input
@@ -629,7 +611,7 @@ export function CheckoutView({
                   value={draft.notes}
                   onChange={(e) => onUpdateDraft((p) => ({ ...p, notes: e.target.value }))}
                   placeholder="مثال: زيادة طحينة، بدون بصل، الاتصال عند الوصول..."
-                  className="w-full h-11 px-4 rounded-xl bg-white border border-[#176B45]/20 text-sm focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+                  className="w-full h-11 px-4 rounded-xl bg-white dark:bg-[#0E1713] border border-[#176B45]/20 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
                 />
               </div>
             </section>
@@ -637,11 +619,11 @@ export function CheckoutView({
 
           {/* Left Column: Sticky Order Summary Card (4 cols) */}
           <aside className="lg:col-span-4 lg:sticky lg:top-24">
-            <div className="bg-white rounded-2xl border border-[#176B45]/15 p-6 shadow-sm space-y-4">
-              <h2 className="text-lg font-extrabold text-[#104B34]">ملخص الطلب</h2>
+            <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/15 dark:border-[#2A3F35] p-6 shadow-sm space-y-4">
+              <h2 className="text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF]">ملخص الطلب</h2>
 
               <div className="space-y-2.5 text-sm">
-                <div className="flex justify-between text-[#35443C]">
+                <div className="flex justify-between text-[#35443C] dark:text-[#D1DFD8]">
                   <span>المجموع الفرعي</span>
                   <span className="font-bold tabular-nums">
                     {formatCurrency(totals.subtotal, currencyLabel)}
@@ -649,7 +631,7 @@ export function CheckoutView({
                 </div>
 
                 {totals.discountAmount > 0 && (
-                  <div className="flex justify-between text-emerald-700 font-bold">
+                  <div className="flex justify-between text-emerald-700 dark:text-emerald-400 font-bold">
                     <span>الخصم ({totals.appliedCoupon?.code})</span>
                     <span className="tabular-nums">
                       -{formatCurrency(totals.discountAmount, currencyLabel)}
@@ -657,7 +639,7 @@ export function CheckoutView({
                   </div>
                 )}
 
-                <div className="flex justify-between text-[#35443C]">
+                <div className="flex justify-between text-[#35443C] dark:text-[#D1DFD8]">
                   <span>رسوم التوصيل</span>
                   <span className="font-bold tabular-nums">
                     {draft.fulfillmentType === 'pickup'
@@ -668,16 +650,16 @@ export function CheckoutView({
                   </span>
                 </div>
 
-                <div className="border-t border-dashed border-[#176B45]/20 pt-3 flex justify-between items-center text-lg font-extrabold text-[#104B34]">
+                <div className="border-t border-dashed border-[#176B45]/20 dark:border-[#2A3F35] pt-3 flex justify-between items-center text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
                   <span>الإجمالي</span>
-                  <span className="tabular-nums">
+                  <span className="tabular-nums dark:text-[#4ADE80]">
                     {formatCurrency(totals.total, currencyLabel)}
                   </span>
                 </div>
               </div>
 
               {totals.belowZoneMinimum && totals.deliveryZone && (
-                <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-xs font-bold text-amber-900 flex items-start gap-2">
+                <div className="rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 p-3 text-xs font-bold text-amber-900 dark:text-amber-200 flex items-start gap-2">
                   <MapPin className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>
                     الحد الأدنى للطلب في {totals.deliveryZone.name} هو{' '}
@@ -687,7 +669,7 @@ export function CheckoutView({
               )}
 
               {submitError && (
-                <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-xs font-bold text-red-800 flex items-start gap-2">
+                <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 p-3 text-xs font-bold text-red-800 dark:text-red-300 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{submitError}</span>
                 </div>

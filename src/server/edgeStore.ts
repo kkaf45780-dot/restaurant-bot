@@ -25,6 +25,10 @@ import {
   INITIAL_ORDERS,
   INITIAL_RESTAURANT,
 } from '../data/restaurant.ts';
+import {
+  isValidRestaurantIdOrSlug,
+  resolveExactRestaurantBundle,
+} from './publicSanitizer.ts';
 import type {
   ActivityLog,
   AdminNotification,
@@ -44,7 +48,7 @@ import type {
 
 export interface KVNamespaceLike {
   get(key: string, type?: 'text' | 'json'): Promise<unknown>;
-  put(key: string, value: string): Promise<void>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
 }
 
 export interface AssetsBindingLike {
@@ -69,6 +73,8 @@ export interface EdgeEnv {
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
 }
 
 interface EdgeDatabaseSchema {
@@ -197,8 +203,14 @@ function mapSupabaseRestaurant(row: Record<string, unknown>): Restaurant {
       (row.weekly_schedule as Restaurant['weeklySchedule']) ?? INITIAL_RESTAURANT.weeklySchedule,
     scheduleExceptions:
       (row.schedule_exceptions as Restaurant['scheduleExceptions']) ?? [],
-    aiSettings:
-      (row.ai_settings as Restaurant['aiSettings']) ?? INITIAL_RESTAURANT.aiSettings,
+    aiSettings: {
+      ...INITIAL_RESTAURANT.aiSettings,
+      ...((row.ai_settings as Partial<Restaurant['aiSettings']>) ?? {}),
+      aiOrderIntake:
+        (row.ai_settings as Restaurant['aiSettings'] | undefined)?.aiOrderIntake ??
+        (row.ai_settings as Restaurant['aiSettings'] | undefined)?.allowedTopics?.orderIntake ??
+        true,
+    },
     systemSettings:
       (row.system_settings as Restaurant['systemSettings']) ?? INITIAL_RESTAURANT.systemSettings,
     updatedAt: String(row.updated_at ?? new Date().toISOString()),
@@ -246,42 +258,47 @@ function mapSupabaseOrder(row: Record<string, unknown>): Order {
   };
 }
 
-export async function getRestaurantBundle(
+export async function findRestaurantBundle(
   env: EdgeEnv,
   restaurantId: string = DEFAULT_RESTAURANT_ID
-): Promise<RestaurantBundle> {
+): Promise<RestaurantBundle | null> {
+  if (!isValidRestaurantIdOrSlug(restaurantId)) {
+    return null;
+  }
+
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
     try {
       const { data: restRow, error: restErr } = await supabase
         .from('restaurants')
         .select('*')
-        .eq('id', restaurantId)
+        .or(`id.eq.${restaurantId},slug.eq.${restaurantId}`)
         .maybeSingle();
 
       if (!restErr && restRow) {
+        const targetId = String(restRow.id);
         const [{ data: cats }, { data: items }, { data: zones }, { data: branches }, { data: coupons }] =
           await Promise.all([
             supabase
               .from('menu_categories')
               .select('*')
-              .eq('restaurant_id', restaurantId)
+              .eq('restaurant_id', targetId)
               .order('sort_order', { ascending: true }),
             supabase
               .from('menu_items')
               .select('*')
-              .eq('restaurant_id', restaurantId)
+              .eq('restaurant_id', targetId)
               .order('sort_order', { ascending: true }),
-            supabase.from('delivery_zones').select('*').eq('restaurant_id', restaurantId),
-            supabase.from('branches').select('*').eq('restaurant_id', restaurantId),
+            supabase.from('delivery_zones').select('*').eq('restaurant_id', targetId),
+            supabase.from('branches').select('*').eq('restaurant_id', targetId),
             supabase
               .from('coupons')
               .select('*')
-              .eq('restaurant_id', restaurantId)
+              .eq('restaurant_id', targetId)
               .eq('is_active', true),
           ]);
 
-        return {
+        const bundle: RestaurantBundle = {
           restaurant: mapSupabaseRestaurant(restRow),
           categories: (cats ?? []).map((c) => ({
             id: c.id,
@@ -342,6 +359,10 @@ export async function getRestaurantBundle(
             applicableItemIds: cp.applicable_item_ids ?? [],
           })),
         };
+        return resolveExactRestaurantBundle(bundle, restaurantId);
+      }
+      if (!restErr && !restRow && restaurantId !== DEFAULT_RESTAURANT_ID) {
+        return null;
       }
     } catch (err) {
       console.error('Supabase read error, falling back to edge store:', err);
@@ -349,13 +370,24 @@ export async function getRestaurantBundle(
   }
 
   const db = await readEdgeDb(env);
-  const restaurant =
-    db.restaurants.find((r) => r.id === restaurantId || r.slug === restaurantId) ??
-    db.restaurants[0];
+  const restaurant = db.restaurants.find(
+    (r) => r.id === restaurantId || r.slug === restaurantId
+  );
+  if (!restaurant) return null;
+
   const targetId = restaurant.id;
 
   return {
-    restaurant,
+    restaurant: {
+      ...restaurant,
+      aiSettings: {
+        ...restaurant.aiSettings,
+        aiOrderIntake:
+          restaurant.aiSettings?.aiOrderIntake ??
+          restaurant.aiSettings?.allowedTopics?.orderIntake ??
+          true,
+      },
+    },
     categories: db.categories
       .filter((c) => c.restaurantId === targetId)
       .sort((a, b) => a.sortOrder - b.sortOrder),
@@ -366,6 +398,17 @@ export async function getRestaurantBundle(
     branches: db.branches.filter((b) => b.restaurantId === targetId),
     activeCoupons: db.coupons.filter((c) => c.restaurantId === targetId && c.isActive),
   };
+}
+
+export async function getRestaurantBundle(
+  env: EdgeEnv,
+  restaurantId: string = DEFAULT_RESTAURANT_ID
+): Promise<RestaurantBundle> {
+  const found = await findRestaurantBundle(env, restaurantId);
+  if (!found) {
+    throw new Error('RESTAURANT_NOT_FOUND');
+  }
+  return found;
 }
 
 export async function updateRestaurant(
@@ -739,7 +782,7 @@ export async function incrementCouponUsage(
     (c) => c.restaurantId === restaurantId && c.code.toUpperCase() === upper
   );
   if (idx >= 0) {
-    db.coupons[idx] = { ...db.coupons[idx], usedCount: db.coupons[idx].usedCount + 1 };
+    db.coupons[idx] = { ...db.coupons[idx], usedCount: (db.coupons[idx].usedCount ?? 0) + 1 };
     await writeEdgeDb(env, db);
   }
 }
@@ -921,7 +964,8 @@ export async function adjustItemStock(
   db.inventoryMovements.unshift(movement);
   db.inventoryMovements = db.inventoryMovements.slice(0, 120);
 
-  if (nextQty <= updatedItem.lowStockThreshold && prevQty > updatedItem.lowStockThreshold) {
+  const lowStockThreshold = updatedItem.lowStockThreshold ?? 8;
+  if (nextQty <= lowStockThreshold && prevQty > lowStockThreshold) {
     db.notifications.unshift({
       id: `notif_stock_${Date.now()}`,
       restaurantId,

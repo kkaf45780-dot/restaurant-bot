@@ -105,12 +105,14 @@ export function ProductDetailsModal({
           </button>
           <span
             className={`absolute bottom-3 right-3 px-3 py-1 rounded-full text-xs font-bold ${
-              item.isAvailable && item.stockQuantity > 0
+              item.isAvailable && (typeof item.stockQuantity !== 'number' || item.stockQuantity > 0)
                 ? 'bg-[#176B45] text-white'
                 : 'bg-neutral-700 text-white'
             }`}
           >
-            {item.isAvailable && item.stockQuantity > 0 ? 'متوفر حالياً' : 'غير متوفر'}
+            {item.isAvailable && (typeof item.stockQuantity !== 'number' || item.stockQuantity > 0)
+              ? 'متوفر حالياً'
+              : 'غير متوفر'}
           </span>
         </div>
 
@@ -244,7 +246,7 @@ export function ProductDetailsModal({
 
             <button
               type="button"
-              disabled={!item.isAvailable || item.stockQuantity <= 0}
+              disabled={!item.isAvailable || (typeof item.stockQuantity === 'number' && item.stockQuantity <= 0)}
               onClick={handleConfirm}
               className="flex-1 min-h-[48px] px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:opacity-50 text-white text-sm font-extrabold flex items-center justify-between cursor-pointer"
             >

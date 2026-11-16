@@ -2,6 +2,8 @@ import type {
   ActivityLog,
   AdminNotification,
   AILogEntry,
+  ChatChallengeResponse,
+  ChatVerificationPayload,
   Coupon,
   DeliveryZone,
   Employee,
@@ -12,10 +14,10 @@ import type {
   MenuItem,
   Order,
   OrderDraft,
+  OrderDraftDiff,
   OrderDraftItem,
   OrderStatus,
   PublicConfigStatus,
-  PublicOrderTracking,
   Restaurant,
   RestaurantBranch,
   RestaurantBundle,
@@ -27,18 +29,6 @@ import type { AdminTabPermission } from './permissions.ts';
 import type { CalculatedOrderResult } from './pricing.ts';
 
 const ADMIN_TOKEN_KEY = 'moazzaf_admin_token';
-
-export class ChatApiError extends Error {
-  status: number;
-  captchaRequired?: boolean;
-
-  constructor(message: string, status: number, captchaRequired?: boolean) {
-    super(message);
-    this.name = 'ChatApiError';
-    this.status = status;
-    this.captchaRequired = captchaRequired;
-  }
-}
 
 export function getStoredAdminToken(): string | null {
   try {
@@ -57,10 +47,27 @@ export function setStoredAdminToken(token: string | null): void {
   }
 }
 
+export class ApiError extends Error {
+  status: number;
+  captchaRequired?: boolean;
+  constructor(message: string, status: number, captchaRequired?: boolean) {
+    super(message);
+    this.status = status;
+    this.captchaRequired = captchaRequired;
+  }
+}
+
 async function parseJsonOrThrow<T>(res: Response): Promise<T> {
-  const data = await res.json().catch(() => ({}));
+  const data = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    captchaRequired?: boolean;
+  };
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error || 'حدث خطأ أثناء الاتصال بالخادم.');
+    throw new ApiError(
+      data.error || 'حدث خطأ أثناء الاتصال بالخادم.',
+      res.status,
+      Boolean(data.captchaRequired)
+    );
   }
   return data as T;
 }
@@ -99,27 +106,38 @@ export async function validateCouponCode(payload: {
   return parseJsonOrThrow(res);
 }
 
-export async function trackOrderByToken(
+export async function trackOrderByNumber(
   restaurantId: string,
-  orderToken: string
-): Promise<{ tracking: PublicOrderTracking }> {
-  const res = await fetch(
-    `/api/orders/track?restaurantId=${encodeURIComponent(restaurantId)}&token=${encodeURIComponent(orderToken.trim())}`
-  );
+  orderNumber: string,
+  token: string
+): Promise<{ order: Order }> {
+  const qs = new URLSearchParams({
+    restaurantId,
+    orderNumber,
+    token,
+  });
+  const res = await fetch(`/api/orders/track?${qs.toString()}`);
   return parseJsonOrThrow(res);
 }
 
 export async function submitOrderRating(
   restaurantId: string,
-  orderToken: string,
+  orderNumber: string,
   rating: number,
   comment: string
-): Promise<{ tracking: PublicOrderTracking }> {
-  const res = await fetch(`/api/orders/${encodeURIComponent(orderToken.trim())}/rate`, {
+): Promise<{ order: Order }> {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderNumber)}/rate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ restaurantId, rating, comment }),
   });
+  return parseJsonOrThrow(res);
+}
+
+export async function fetchChatChallenge(sessionId: string): Promise<ChatChallengeResponse> {
+  const res = await fetch(
+    `/api/chat/challenge?sessionId=${encodeURIComponent(sessionId)}`
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -128,12 +146,17 @@ export async function sendChatMessage(payload: {
   message: string;
   history: Array<{ role: 'user' | 'assistant'; text: string }>;
   orderDraft: OrderDraft;
-  captchaToken?: string;
+  sessionId?: string;
+  verification?: ChatVerificationPayload;
 }): Promise<{
   reply: string;
   suggestedAction: SuggestedChatAction;
   updatedDraft: OrderDraft;
   totals: CalculatedOrderResult;
+  appliedChanges: string[];
+  rejectedChanges: string[];
+  unknownItemIds: string[];
+  diff: OrderDraftDiff;
   usedFallback: boolean;
 }> {
   const res = await fetch('/api/chat', {
@@ -141,22 +164,7 @@ export async function sendChatMessage(payload: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const errBody = data as { error?: string; captchaRequired?: boolean };
-    throw new ChatApiError(
-      errBody.error || 'حدث خطأ أثناء الاتصال بالخادم.',
-      res.status,
-      errBody.captchaRequired
-    );
-  }
-  return data as {
-    reply: string;
-    suggestedAction: SuggestedChatAction;
-    updatedDraft: OrderDraft;
-    totals: CalculatedOrderResult;
-    usedFallback: boolean;
-  };
+  return parseJsonOrThrow(res);
 }
 
 export async function submitOrder(payload: {
@@ -171,7 +179,12 @@ export async function submitOrder(payload: {
   customerAddress: string;
   notes: string;
   idempotencyKey?: string;
-}): Promise<{ order: Order; whatsappUrl: string; deduplicated?: boolean }> {
+}): Promise<{
+  order: Order;
+  whatsappUrl: string;
+  orderToken?: string;
+  deduplicated?: boolean;
+}> {
   const res = await fetch('/api/orders', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -198,7 +211,6 @@ export async function adminLoginLocal(
   token: string;
   email: string;
   role?: EmployeeRole;
-  mustChangePassword?: boolean;
   permissions?: AdminTabPermission[];
 }> {
   const res = await fetch('/api/admin/login', {
@@ -213,7 +225,6 @@ export async function fetchAdminMe(token: string): Promise<{
   authenticated: boolean;
   email: string;
   role?: EmployeeRole;
-  mustChangePassword?: boolean;
   permissions?: AdminTabPermission[];
 }> {
   const res = await fetch('/api/admin/me', {
@@ -476,13 +487,13 @@ export async function adminUpdatePassword(
   token: string,
   currentPassword: string,
   newPassword: string
-): Promise<{ ok: boolean; token?: string; mustChangePassword?: boolean }> {
+): Promise<void> {
   const res = await fetch('/api/admin/password', {
     method: 'POST',
     headers: adminHeaders(token),
     body: JSON.stringify({ currentPassword, newPassword }),
   });
-  return parseJsonOrThrow(res);
+  await parseJsonOrThrow(res);
 }
 
 export async function adminUploadImage(
