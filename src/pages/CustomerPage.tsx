@@ -113,14 +113,14 @@ export function CustomerPage({
   const hydrateAfterBundle = useCallback((loadedBundle: RestaurantBundle) => {
     document.title = `موظف المطعم — ${loadedBundle.restaurant.name}`;
     const restId = loadedBundle.restaurant.id;
-    const savedChat = sessionStorage.getItem(`chat_${restId}`);
+    const savedChat = localStorage.getItem(`chat_${restId}`);
     const savedDraft = localStorage.getItem(`draft_${restId}`);
 
     if (savedChat) {
       try {
         const parsed = JSON.parse(savedChat) as ChatMessage[];
         if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
+          setMessages(parsed.slice(-20));
         } else {
           setMessages([
             {
@@ -210,7 +210,7 @@ export function CustomerPage({
   useEffect(() => {
     if (!bundle) return;
     try {
-      sessionStorage.setItem(`chat_${bundle.restaurant.id}`, JSON.stringify(messages));
+      localStorage.setItem(`chat_${bundle.restaurant.id}`, JSON.stringify(messages.slice(-20)));
     } catch {
       // Ignore
     }
@@ -456,17 +456,51 @@ export function CustomerPage({
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] flex items-center justify-center p-6">
-        <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] p-8 text-center max-w-sm w-full space-y-3">
-          <div className="w-10 h-10 rounded-xl bg-[#176B45]/10 text-[#176B45] flex items-center justify-center mx-auto font-bold">
-            م
+      <div
+        className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] flex flex-col"
+        aria-busy="true"
+        aria-label="جاري تحميل بيانات المطعم"
+      >
+        <div className="h-[72px] bg-white/90 dark:bg-[#101A15] border-b border-[#176B45]/10 px-4 sm:px-6 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-[#176B45]/15 animate-pulse" />
+            <div className="space-y-2">
+              <div className="w-28 h-4 rounded bg-[#176B45]/15 animate-pulse" />
+              <div className="w-20 h-3 rounded bg-[#176B45]/10 animate-pulse" />
+            </div>
           </div>
-          <p className="text-base font-bold text-[#18221D] dark:text-[#ECF3EF]">
-            جاري تحميل بيانات المطعم...
-          </p>
-          <p className="text-xs text-[#5C6B63] dark:text-[#A3B8AE]">
-            لحظات وتكون القائمة والموظف الذكي جاهزين.
-          </p>
+          <div className="flex items-center gap-2">
+            <div className="w-10 h-10 rounded-xl bg-[#176B45]/10 animate-pulse" />
+            <div className="w-24 h-10 rounded-xl bg-[#176B45]/15 animate-pulse" />
+          </div>
+        </div>
+        <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 py-10 space-y-10">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+            <div className="lg:col-span-6 space-y-4">
+              <div className="w-56 h-7 rounded-full bg-white/80 dark:bg-[#14201B] animate-pulse" />
+              <div className="w-3/4 h-12 rounded-xl bg-[#176B45]/15 animate-pulse" />
+              <div className="w-full h-16 rounded-xl bg-white/70 dark:bg-[#14201B] animate-pulse" />
+              <div className="flex gap-3 pt-2">
+                <div className="w-32 h-12 rounded-full bg-[#176B45]/25 animate-pulse" />
+                <div className="w-36 h-12 rounded-full bg-white/80 dark:bg-[#14201B] animate-pulse" />
+              </div>
+            </div>
+            <div className="lg:col-span-6">
+              <div className="w-full max-w-[490px] aspect-[4/3] mx-auto rounded-3xl bg-[#176B45]/15 animate-pulse" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            {[0, 1, 2].map((idx) => (
+              <div
+                key={idx}
+                className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 overflow-hidden p-4 space-y-3"
+              >
+                <div className="h-40 rounded-xl bg-[#176B45]/10 animate-pulse" />
+                <div className="w-2/3 h-4 rounded bg-[#176B45]/15 animate-pulse" />
+                <div className="w-full h-3 rounded bg-[#176B45]/10 animate-pulse" />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -496,6 +530,12 @@ export function CustomerPage({
 
   return (
     <div className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] text-[#18221D] dark:text-[#ECF3EF] flex flex-col">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:right-3 focus:z-50 focus:px-4 focus:py-2 focus:rounded-xl focus:bg-[#104B34] focus:text-white focus:text-sm focus:font-bold focus:shadow-lg"
+      >
+        انتقل إلى المحتوى
+      </a>
       <CustomerNavbar
         restaurant={restaurant}
         hoursStatus={hoursStatus}
@@ -532,7 +572,7 @@ export function CustomerPage({
         </div>
       )}
 
-      <main className="flex-1">
+      <main id="main-content" tabIndex={-1} className="flex-1 focus:outline-none">
         {route === 'home' && (
           <HomepageView
             restaurant={restaurant}

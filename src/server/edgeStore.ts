@@ -1199,14 +1199,62 @@ export async function listAiLogs(env: EdgeEnv, restaurantId: string): Promise<AI
   return db.aiLogs.filter((l) => l.restaurantId === restaurantId);
 }
 
-export async function getAdminPassword(env: EdgeEnv): Promise<string> {
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashPasswordEdge(password: string, saltHex?: string): Promise<string> {
+  const salt =
+    saltHex || bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: enc.encode(salt),
+      iterations: 10000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+  return `pbkdf2$${salt}$${bytesToHex(new Uint8Array(derived))}`;
+}
+
+function safeEqualEdge(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+export async function verifyAdminPassword(env: EdgeEnv, candidate: string): Promise<boolean> {
   const db = await readEdgeDb(env);
-  return db.adminPasswordOverride || env.ADMIN_PASSWORD || 'Admin@1234';
+  const stored = db.adminPasswordOverride;
+  if (stored) {
+    if (stored.startsWith('pbkdf2$')) {
+      const [, salt, expectedHash] = stored.split('$');
+      if (!salt || !expectedHash) return false;
+      const computed = (await hashPasswordEdge(candidate, salt)).split('$')[2] || '';
+      return safeEqualEdge(computed, expectedHash);
+    }
+    return safeEqualEdge(candidate, stored);
+  }
+  const envPass = env.ADMIN_PASSWORD || 'Admin@1234';
+  return safeEqualEdge(candidate, envPass);
 }
 
 export async function setAdminPassword(env: EdgeEnv, newPassword: string): Promise<void> {
   const db = await readEdgeDb(env);
-  db.adminPasswordOverride = newPassword;
+  db.adminPasswordOverride = await hashPasswordEdge(newPassword);
   await writeEdgeDb(env, db);
 }
 

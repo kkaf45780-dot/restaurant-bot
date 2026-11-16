@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
@@ -1235,14 +1236,38 @@ export async function listAiLogs(restaurantId: string): Promise<AILogEntry[]> {
   return db.aiLogs.filter((l) => l.restaurantId === restaurantId);
 }
 
-export function getLocalAdminPassword(): string {
+function hashPasswordNode(password: string, saltHex?: string): string {
+  const salt = saltHex || crypto.randomBytes(16).toString('hex');
+  const hashHex = crypto.pbkdf2Sync(password, salt, 10000, 32, 'sha256').toString('hex');
+  return `pbkdf2$${salt}$${hashHex}`;
+}
+
+function safeEqualStrings(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, 'utf-8');
+  const bBuf = Buffer.from(b, 'utf-8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+export function verifyLocalAdminPassword(candidate: string): boolean {
   const db = readLocalDb();
-  return db.adminPasswordOverride || process.env.ADMIN_PASSWORD || 'Admin@1234';
+  const stored = db.adminPasswordOverride;
+  if (stored) {
+    if (stored.startsWith('pbkdf2$')) {
+      const [, salt, expectedHash] = stored.split('$');
+      if (!salt || !expectedHash) return false;
+      const computed = hashPasswordNode(candidate, salt).split('$')[2] || '';
+      return safeEqualStrings(computed, expectedHash);
+    }
+    return safeEqualStrings(candidate, stored);
+  }
+  const envPass = process.env.ADMIN_PASSWORD || 'Admin@1234';
+  return safeEqualStrings(candidate, envPass);
 }
 
 export function setLocalAdminPassword(newPassword: string): void {
   const db = readLocalDb();
-  db.adminPasswordOverride = newPassword;
+  db.adminPasswordOverride = hashPasswordNode(newPassword);
   writeLocalDb(db);
 }
 

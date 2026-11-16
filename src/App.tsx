@@ -3,10 +3,84 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
+import { Component, Suspense, lazy, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
 import type { CustomerRoute } from './components/customer/CustomerNavbar.tsx';
-import { AdminPage } from './pages/AdminPage.tsx';
 import { CustomerPage } from './pages/CustomerPage.tsx';
+
+const AdminPage = lazy(() =>
+  import('./pages/AdminPage.tsx').then((m) => ({ default: m.AdminPage }))
+);
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Unhandled UI error:', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          dir="rtl"
+          className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] flex items-center justify-center p-6"
+        >
+          <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-red-200 dark:border-red-800 p-8 text-center max-w-md w-full space-y-4 shadow-sm">
+            <h1 className="text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
+              حدث خطأ غير متوقع
+            </h1>
+            <p className="text-sm text-[#5C6B63] dark:text-[#A3B8AE]">
+              نعتذر عن هذا العطل المؤقت. يمكنك إعادة المحاولة أو تحديث الصفحة للعودة إلى التطبيق.
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => this.setState({ hasError: false })}
+                className="min-h-[44px] px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-sm font-bold cursor-pointer"
+              >
+                إعادة المحاولة
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="min-h-[44px] px-5 rounded-xl border border-[#176B45]/25 text-[#104B34] dark:text-[#ECF3EF] text-sm font-bold hover:bg-[#F7F3E9] dark:hover:bg-[#192822] cursor-pointer"
+              >
+                تحديث الصفحة
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function AdminLoadingFallback() {
+  return (
+    <div
+      dir="rtl"
+      className="min-h-screen bg-[#F7F3E9] dark:bg-[#0B120F] flex items-center justify-center p-6"
+    >
+      <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] p-8 text-center max-w-sm w-full space-y-3">
+        <div className="w-10 h-10 rounded-xl bg-[#176B45]/10 text-[#176B45] flex items-center justify-center mx-auto font-bold animate-pulse">
+          م
+        </div>
+        <p className="text-sm font-bold text-[#18221D] dark:text-[#ECF3EF]">
+          جاري تحميل لوحة التحكم...
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function parseLocation(): {
   isAdmin: boolean;
@@ -96,16 +170,20 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  if (loc.isAdmin) {
-    return <AdminPage onNavigateCustomer={() => navigateCustomerRoute('home')} />;
-  }
-
   return (
-    <CustomerPage
-      route={loc.customerRoute}
-      initialTrackOrderNumber={loc.trackOrder}
-      onNavigateRoute={navigateCustomerRoute}
-      onNavigateAdmin={navigateAdmin}
-    />
+    <ErrorBoundary>
+      {loc.isAdmin ? (
+        <Suspense fallback={<AdminLoadingFallback />}>
+          <AdminPage onNavigateCustomer={() => navigateCustomerRoute('home')} />
+        </Suspense>
+      ) : (
+        <CustomerPage
+          route={loc.customerRoute}
+          initialTrackOrderNumber={loc.trackOrder}
+          onNavigateRoute={navigateCustomerRoute}
+          onNavigateAdmin={navigateAdmin}
+        />
+      )}
+    </ErrorBoundary>
   );
 }

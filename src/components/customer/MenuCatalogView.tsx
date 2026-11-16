@@ -94,6 +94,7 @@ export function MenuCatalogView({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              aria-label="ابحث عن صنف في القائمة"
               placeholder="ابحث عن صنف... (مثال: كباب، حواوشي، أم علي)"
               className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9] dark:bg-[#0E1713] border border-[#176B45]/15 dark:border-[#2A3F35] text-sm text-[#18221D] dark:text-[#ECF3EF] placeholder:text-[#7A8880] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
             />
@@ -183,6 +184,8 @@ export function MenuCatalogView({
                         <img
                           src={imgSrc}
                           alt={item.name}
+                          loading="lazy"
+                          decoding="async"
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         />
                         <span
@@ -319,6 +322,7 @@ export function MenuCatalogView({
                             <button
                               type="button"
                               onClick={() => onUpdateLineQty(key, line.quantity - 1)}
+                              aria-label="تقليل الكمية"
                               className="w-7 h-7 rounded-lg bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] flex items-center justify-center hover:bg-[#EFE9DC] cursor-pointer"
                             >
                               <Minus className="w-3 h-3" />
@@ -329,6 +333,7 @@ export function MenuCatalogView({
                             <button
                               type="button"
                               onClick={() => onUpdateLineQty(key, line.quantity + 1)}
+                              aria-label="زيادة الكمية"
                               className="w-7 h-7 rounded-lg bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] flex items-center justify-center hover:bg-[#EFE9DC] cursor-pointer"
                             >
                               <Plus className="w-3 h-3" />

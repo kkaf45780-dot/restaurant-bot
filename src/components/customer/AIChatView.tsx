@@ -55,6 +55,7 @@ export function AIChatView({
   onGoCheckout,
 }: AIChatViewProps) {
   const [inputText, setInputText] = useState('');
+  const [confirmReset, setConfirmReset] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -104,14 +105,39 @@ export function AIChatView({
               </span>
             </div>
 
-            <button
-              type="button"
-              onClick={onResetChat}
-              className="min-h-[38px] px-3 rounded-xl text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] hover:text-[#104B34] hover:bg-[#EFE9DC] dark:hover:bg-[#192822] flex items-center gap-1.5 cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>محادثة جديدة</span>
-            </button>
+            {confirmReset ? (
+              <div className="flex items-center gap-1.5" role="group" aria-label="تأكيد مسح المحادثة">
+                <span className="text-xs font-bold text-[#104B34] dark:text-[#ECF3EF]">
+                  تأكيد المسح؟
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmReset(false);
+                    onResetChat();
+                  }}
+                  className="min-h-[34px] px-2.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  نعم
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmReset(false)}
+                  className="min-h-[34px] px-2.5 rounded-lg bg-[#EFE9DC] dark:bg-[#192822] text-[#18221D] dark:text-[#ECF3EF] text-xs font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmReset(true)}
+                className="min-h-[38px] px-3 rounded-xl text-xs font-bold text-[#5C6B63] dark:text-[#A3B8AE] hover:text-[#104B34] hover:bg-[#EFE9DC] dark:hover:bg-[#192822] flex items-center gap-1.5 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>محادثة جديدة</span>
+              </button>
+            )}
           </div>
 
           {!isOnline && (
@@ -124,6 +150,9 @@ export function AIChatView({
           {/* Messages Feed */}
           <div
             ref={scrollContainerRef}
+            role="log"
+            aria-live="polite"
+            aria-busy={isLoading}
             className="flex-1 overflow-y-auto p-5 space-y-4 bg-[#F7F3E9]/60 dark:bg-[#0B120F]"
           >
             {messages.map((msg, idx) => {
@@ -273,6 +302,7 @@ export function AIChatView({
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
+              aria-label="اكتب رسالتك"
               placeholder={
                 isOnline
                   ? 'اكتب رسالتك هنا... (مثال: هل يوجد توصيل لمدينة نصر؟)'
@@ -351,6 +381,10 @@ export function AIChatView({
                     <img
                       src={resolveAssetUrl(dish.imageUrl)}
                       alt={dish.name}
+                      width={56}
+                      height={48}
+                      loading="lazy"
+                      decoding="async"
                       className="w-14 h-12 rounded-lg object-cover shrink-0 bg-[#F7F3E9]"
                     />
                     <div className="min-w-0">
@@ -372,6 +406,7 @@ export function AIChatView({
                     type="button"
                     onClick={() => onQuickAddItem(dish)}
                     title="إضافة سريعة للطلب"
+                    aria-label={`إضافة ${dish.name} للطلب`}
                     className="w-8 h-8 rounded-lg bg-[#104B34] hover:bg-[#176B45] text-white flex items-center justify-center shrink-0 cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />

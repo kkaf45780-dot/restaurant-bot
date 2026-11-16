@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
@@ -30,7 +31,6 @@ import {
   findOrderByIdempotencyKey,
   findOrderByNumberOrId,
   findOrdersByPhone,
-  getLocalAdminPassword,
   getRestaurantBundle,
   incrementCouponUsage,
   isSupabaseBackendActive,
@@ -54,20 +54,22 @@ import {
   upsertDeliveryZone,
   upsertEmployee,
   upsertMenuItem,
+  verifyLocalAdminPassword,
 } from './src/server/store.ts';
-import type {
-  Coupon,
-  DeliveryZone,
-  Employee,
-  EmployeeRole,
-  FulfillmentType,
-  MenuCategory,
-  MenuItem,
-  Order,
-  OrderDraftItem,
-  OrderStatus,
-  RestaurantBranch,
-  ServiceConfigStatus,
+import {
+  ALLOWED_AI_MODELS,
+  type Coupon,
+  type DeliveryZone,
+  type Employee,
+  type EmployeeRole,
+  type FulfillmentType,
+  type MenuCategory,
+  type MenuItem,
+  type Order,
+  type OrderDraftItem,
+  type OrderStatus,
+  type RestaurantBranch,
+  type ServiceConfigStatus,
 } from './src/types/restaurant.ts';
 
 dotenv.config();
@@ -90,17 +92,26 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// In-memory sliding-window rate limiter for AI chat
+// In-memory sliding-window rate limiters
 const chatRateMap = new Map<string, number[]>();
-function checkChatRateLimit(ip: string): boolean {
+const restaurantRateMap = new Map<string, number[]>();
+
+function checkSlidingLimit(map: Map<string, number[]>, key: string, maxRequests: number): boolean {
   const now = Date.now();
   const windowMs = 60_000;
-  const maxRequests = 25;
-  const recent = (chatRateMap.get(ip) ?? []).filter((ts) => now - ts < windowMs);
+  const recent = (map.get(key) ?? []).filter((ts) => now - ts < windowMs);
   if (recent.length >= maxRequests) return false;
   recent.push(now);
-  chatRateMap.set(ip, recent);
+  map.set(key, recent);
   return true;
+}
+
+function checkChatRateLimit(ip: string): boolean {
+  return checkSlidingLimit(chatRateMap, ip, 15);
+}
+
+function checkRestaurantRateLimit(ip: string): boolean {
+  return checkSlidingLimit(restaurantRateMap, ip, 60);
 }
 
 interface AdminRequest extends Request {
@@ -228,6 +239,19 @@ async function startServer(): Promise<void> {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (process.env.NODE_ENV === 'production') {
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; frame-ancestors 'none'"
+      );
+    }
+    next();
+  });
+
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
@@ -244,6 +268,11 @@ async function startServer(): Promise<void> {
   // Public Restaurant Bundle + Computed Hours
   app.get('/api/restaurant/:slug?', async (req, res) => {
     try {
+      const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+      if (!checkRestaurantRateLimit(clientIp)) {
+        res.status(429).json({ error: 'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.' });
+        return;
+      }
       const slugOrId = req.params.slug || DEFAULT_RESTAURANT_ID;
       const bundle = await getRestaurantBundle(slugOrId);
       const hoursStatus = evaluateRestaurantHours(bundle.restaurant);
@@ -585,9 +614,9 @@ async function startServer(): Promise<void> {
       const cleanEmail = String(email || '').trim().toLowerCase();
       const cleanPass = String(password || '');
       const expectedEmail = (process.env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-      const expectedPassword = getLocalAdminPassword();
+      const isPasswordValid = verifyLocalAdminPassword(cleanPass);
 
-      if (cleanEmail === expectedEmail && cleanPass === expectedPassword) {
+      if (cleanEmail === expectedEmail && isPasswordValid) {
         const role: EmployeeRole = 'owner';
         const token = signLocalAdminToken(expectedEmail, role);
         res.json({ token, email: expectedEmail, role, permissions: ROLE_PERMISSIONS[role] });
@@ -595,7 +624,7 @@ async function startServer(): Promise<void> {
       }
 
       const employee = await findEmployeeByEmail(DEFAULT_RESTAURANT_ID, cleanEmail);
-      if (employee && cleanPass === expectedPassword) {
+      if (employee && isPasswordValid) {
         const token = signLocalAdminToken(employee.email, employee.role);
         res.json({
           token,
@@ -671,6 +700,13 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const { restaurantId = DEFAULT_RESTAURANT_ID, ...patch } = req.body ?? {};
+        if (
+          patch?.aiSettings?.model &&
+          !(ALLOWED_AI_MODELS as readonly string[]).includes(String(patch.aiSettings.model))
+        ) {
+          res.status(400).json({ error: 'نموذج الذكاء الاصطناعي المختار غير مسموح به.' });
+          return;
+        }
         const updated = await updateRestaurant(restaurantId, patch);
         const hoursStatus = evaluateRestaurantHours(updated);
         await appendActivityLog({
@@ -1121,15 +1157,18 @@ async function startServer(): Promise<void> {
     requirePermission('system'),
     (req, res) => {
       const { currentPassword, newPassword } = req.body ?? {};
-      if (String(currentPassword || '') !== getLocalAdminPassword()) {
+      if (!verifyLocalAdminPassword(String(currentPassword || ''))) {
         res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
         return;
       }
-      if (!newPassword || String(newPassword).length < 6) {
-        res.status(400).json({ error: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل.' });
+      const nextPass = String(newPassword || '');
+      if (nextPass.length < 8 || !/[A-Z]/.test(nextPass) || !/\d/.test(nextPass)) {
+        res.status(400).json({
+          error: 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.',
+        });
         return;
       }
-      setLocalAdminPassword(String(newPassword));
+      setLocalAdminPassword(nextPass);
       res.json({ ok: true });
     }
   );
@@ -1154,11 +1193,37 @@ async function startServer(): Promise<void> {
     }
   });
 
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV !== 'production') {
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: hmrDisabled ? false : { server: httpServer },
+        ws: hmrDisabled ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
+    if (hmrDisabled) {
+      app.get('/@vite/client', async (_req, res, next) => {
+        try {
+          const transformed = await vite.transformRequest('/@vite/client');
+          if (!transformed) {
+            next();
+            return;
+          }
+          const patched = transformed.code.replace(
+            'transport.connect(createHMRHandler(handleMessage));',
+            '/* HMR disabled: WebSocket connection skipped */'
+          );
+          res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+          res.send(patched);
+        } catch {
+          next();
+        }
+      });
+    }
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
@@ -1168,7 +1233,7 @@ async function startServer(): Promise<void> {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
 }

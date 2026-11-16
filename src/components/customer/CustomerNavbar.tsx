@@ -155,6 +155,7 @@ export function CustomerNavbar({
               type="button"
               onClick={onInstallApp}
               title="تثبيت التطبيق"
+              aria-label="تثبيت التطبيق"
               className="hidden sm:inline-flex h-10 px-3 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] border border-[#176B45]/20 text-[#104B34] dark:text-[#4ADE80] text-xs font-bold items-center gap-1.5 cursor-pointer whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5" />
@@ -208,6 +209,7 @@ export function CustomerNavbar({
           <button
             type="button"
             onClick={() => handleNavClick('checkout')}
+            aria-label={`السلة (${cartCount})`}
             className={`relative h-10 px-3 rounded-xl border flex items-center gap-1.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
               activeRoute === 'checkout'
                 ? 'bg-[#104B34] text-white border-[#104B34]'
@@ -237,6 +239,7 @@ export function CustomerNavbar({
             type="button"
             onClick={onNavigateAdmin}
             title="لوحة تحكم المدير"
+            aria-label="لوحة تحكم المدير"
             className="hidden sm:inline-flex h-10 px-3 rounded-xl border border-[#176B45]/20 dark:border-[#2A3F35] hover:bg-[#F7F3E9] dark:hover:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] text-xs font-bold items-center gap-1.5 cursor-pointer whitespace-nowrap"
           >
             <Lock className="w-3.5 h-3.5" />

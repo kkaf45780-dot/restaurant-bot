@@ -24,7 +24,6 @@ import {
   findOrderByIdempotencyKey,
   findOrderByNumberOrId,
   findOrdersByPhone,
-  getAdminPassword,
   getRestaurantBundle,
   incrementCouponUsage,
   isSupabaseBackendActive,
@@ -48,37 +47,64 @@ import {
   upsertDeliveryZone,
   upsertEmployee,
   upsertMenuItem,
+  verifyAdminPassword,
 } from './server/edgeStore.ts';
 import { runReceptionistChatCore } from './server/geminiCore.ts';
-import type {
-  Coupon,
-  DeliveryZone,
-  Employee,
-  EmployeeRole,
-  FulfillmentType,
-  MenuCategory,
-  MenuItem,
-  Order,
-  OrderDraftItem,
-  OrderStatus,
-  RestaurantBranch,
-  ServiceConfigStatus,
+import {
+  ALLOWED_AI_MODELS,
+  type Coupon,
+  type DeliveryZone,
+  type Employee,
+  type EmployeeRole,
+  type FulfillmentType,
+  type MenuCategory,
+  type MenuItem,
+  type Order,
+  type OrderDraftItem,
+  type OrderStatus,
+  type RestaurantBranch,
+  type ServiceConfigStatus,
 } from './types/restaurant.ts';
 
 const VALID_ROLES: EmployeeRole[] = ['owner', 'manager', 'cashier', 'kitchen'];
 const DEFAULT_SESSION_SECRET = 'meshweyat-elhara-local-session-secret-2026';
 
-// In-memory sliding-window rate limiter per worker isolate
+// In-memory sliding-window rate limiters per worker isolate
 const chatRateMap = new Map<string, number[]>();
-function checkChatRateLimit(ip: string): boolean {
+const restaurantRateMap = new Map<string, number[]>();
+
+function checkSlidingLimit(map: Map<string, number[]>, key: string, maxRequests: number): boolean {
   const now = Date.now();
   const windowMs = 60_000;
-  const maxRequests = 25;
-  const recent = (chatRateMap.get(ip) ?? []).filter((ts) => now - ts < windowMs);
+  const recent = (map.get(key) ?? []).filter((ts) => now - ts < windowMs);
   if (recent.length >= maxRequests) return false;
   recent.push(now);
-  chatRateMap.set(ip, recent);
+  map.set(key, recent);
   return true;
+}
+
+function checkChatRateLimit(ip: string): boolean {
+  return checkSlidingLimit(chatRateMap, ip, 15);
+}
+
+function checkRestaurantRateLimit(ip: string): boolean {
+  return checkSlidingLimit(restaurantRateMap, ip, 60);
+}
+
+function withSecurityHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; frame-ancestors 'none'"
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -258,6 +284,16 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
     (pathname === '/api/restaurant' || pathname.startsWith('/api/restaurant/'))
   ) {
     try {
+      const clientIp =
+        request.headers.get('cf-connecting-ip') ||
+        request.headers.get('x-forwarded-for') ||
+        'unknown';
+      if (!checkRestaurantRateLimit(clientIp)) {
+        return Response.json(
+          { error: 'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.' },
+          { status: 429 }
+        );
+      }
       const slug = pathname.slice('/api/restaurant'.length).replace(/^\//, '');
       const slugOrId = slug ? decodeURIComponent(slug) : DEFAULT_RESTAURANT_ID;
       const bundle = await getRestaurantBundle(env, slugOrId);
@@ -659,10 +695,10 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       const cleanEmail = String(body.email || '').trim().toLowerCase();
       const cleanPass = String(body.password || '');
       const expectedEmail = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-      const expectedPassword = await getAdminPassword(env);
+      const isPasswordValid = await verifyAdminPassword(env, cleanPass);
       const secret = getSessionSecret(env);
 
-      if (cleanEmail === expectedEmail && cleanPass === expectedPassword) {
+      if (cleanEmail === expectedEmail && isPasswordValid) {
         const role: EmployeeRole = 'owner';
         const token = await signAdminToken(secret, expectedEmail, role);
         return Response.json({
@@ -674,7 +710,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       }
 
       const employee = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, cleanEmail);
-      if (employee && cleanPass === expectedPassword) {
+      if (employee && isPasswordValid) {
         const token = await signAdminToken(secret, employee.email, employee.role);
         return Response.json({
           token,
@@ -753,6 +789,13 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       try {
         const body = await readJsonBody<{ restaurantId?: string } & Record<string, unknown>>(request);
         const { restaurantId = DEFAULT_RESTAURANT_ID, ...patch } = body;
+        const aiPatch = patch.aiSettings as { model?: string } | undefined;
+        if (aiPatch?.model && !(ALLOWED_AI_MODELS as readonly string[]).includes(String(aiPatch.model))) {
+          return Response.json(
+            { error: 'نموذج الذكاء الاصطناعي المختار غير مسموح به.' },
+            { status: 400 }
+          );
+        }
         const updated = await updateRestaurant(env, restaurantId, patch);
         const hoursStatus = evaluateRestaurantHours(updated);
         await appendActivityLog(env, {
@@ -1171,17 +1214,21 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       const denied = checkPermission(auth.role, 'system');
       if (denied) return denied;
       const body = await readJsonBody<{ currentPassword?: string; newPassword?: string }>(request);
-      const current = await getAdminPassword(env);
-      if (String(body.currentPassword || '') !== current) {
+      const currentOk = await verifyAdminPassword(env, String(body.currentPassword || ''));
+      if (!currentOk) {
         return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
       }
-      if (!body.newPassword || String(body.newPassword).length < 6) {
+      const nextPass = String(body.newPassword || '');
+      if (nextPass.length < 8 || !/[A-Z]/.test(nextPass) || !/\d/.test(nextPass)) {
         return Response.json(
-          { error: 'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل.' },
+          {
+            error:
+              'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.',
+          },
           { status: 400 }
         );
       }
-      await setAdminPassword(env, String(body.newPassword));
+      await setAdminPassword(env, nextPass);
       return Response.json({ ok: true });
     }
 
@@ -1224,11 +1271,17 @@ export default {
   async fetch(request: Request, env: EdgeEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
-      return handleApiRequest(request, env);
+      const res = await handleApiRequest(request, env);
+      return withSecurityHeaders(res);
     }
 
     if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
+      const assetRes = await env.ASSETS.fetch(request);
+      const contentType = assetRes.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        return withSecurityHeaders(assetRes);
+      }
+      return assetRes;
     }
 
     return new Response('Static assets binding (ASSETS) is not configured.', { status: 500 });

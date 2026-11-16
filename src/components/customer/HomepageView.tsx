@@ -137,6 +137,7 @@ export function HomepageView({
                   <img
                     src={heroSrc}
                     alt={`صينية ${restaurant.name}`}
+                    decoding="async"
                     onError={() => setHeroImgBroken(true)}
                     className="w-full h-full object-cover"
                   />
@@ -195,6 +196,10 @@ export function HomepageView({
                   <img
                     src={thumb}
                     alt={cat.name}
+                    width={56}
+                    height={56}
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                   />
                 </div>
@@ -234,6 +239,8 @@ export function HomepageView({
                     <img
                       src={imgSrc}
                       alt={item.name}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                     />
                     <span className="absolute bottom-3 right-3 px-2.5 py-1 rounded-full bg-[#176B45] text-white text-[11px] font-bold">

@@ -89,6 +89,7 @@ export function AISettingsSection({
             >
               <option value="gemini-4-hydrogen">gemini-4-hydrogen (الافتراضي المتوازن)</option>
               <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (فائق السرعة)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (موصى به للنشر الخارجي)</option>
             </select>
           </div>
 
@@ -278,6 +279,17 @@ export function SystemSettingsSection({
 
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (
+      newPassword.length < 8 ||
+      !/[A-Z]/.test(newPassword) ||
+      !/\d/.test(newPassword)
+    ) {
+      onNotify(
+        'error',
+        'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.'
+      );
+      return;
+    }
     setChangingPass(true);
     try {
       await adminUpdatePassword(token, currentPassword, newPassword);
@@ -443,9 +455,10 @@ export function SystemSettingsSection({
               type="password"
               dir="ltr"
               required
+              minLength={8}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="كلمة المرور الجديدة (6 أحرف فأكثر)"
+              placeholder="كلمة المرور الجديدة (8 أحرف، حرف كبير ورقم)"
               className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-left"
             />
           </div>

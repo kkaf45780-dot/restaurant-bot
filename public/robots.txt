@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+
+Sitemap: https://restaurant-bot.kkaf45780.workers.dev/sitemap.xml

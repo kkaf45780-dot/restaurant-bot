@@ -221,9 +221,17 @@ export interface AIAllowedTopics {
   orderIntake: boolean;
 }
 
+export const ALLOWED_AI_MODELS = [
+  'gemini-4-hydrogen',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+] as const;
+
+export type AIModelId = (typeof ALLOWED_AI_MODELS)[number];
+
 export interface AISettings {
   enabled: boolean;
-  model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+  model: AIModelId;
   welcomeMessage: string;
   tone: AITone;
   allowedTopics: AIAllowedTopics;

@@ -1,16 +1,15 @@
-import { ArrowRight, KeyRound, Lock } from 'lucide-react';
+import { ArrowRight, Lock } from 'lucide-react';
 import { useState } from 'react';
 import { adminLoginLocal } from '../../lib/api.ts';
 import { isSupabaseClientConfigured, supabase } from '../../lib/supabase.ts';
 
 interface AdminLoginProps {
-  demoAdminEmail: string;
+  demoAdminEmail?: string;
   onSuccess: (token: string, email: string) => void;
   onBackToStore: () => void;
 }
 
 export function AdminLogin({
-  demoAdminEmail,
   onSuccess,
   onBackToStore,
 }: AdminLoginProps) {
@@ -39,7 +38,6 @@ export function AdminLogin({
           return;
         }
         if (error) {
-          // Allow fallback to local admin check if configured for demo testing
           try {
             const localRes = await adminLoginLocal(email.trim(), password);
             onSuccess(localRes.token, localRes.email);
@@ -59,11 +57,6 @@ export function AdminLogin({
     } finally {
       setLoading(false);
     }
-  };
-
-  const fillDemoCredentials = () => {
-    setEmail(demoAdminEmail || 'admin@hara-grill.eg');
-    setPassword('Admin@1234');
   };
 
   return (
@@ -90,49 +83,38 @@ export function AdminLogin({
           </p>
         </div>
 
-        {!isSupabaseClientConfigured && (
-          <div className="rounded-xl bg-[#FAF7F0] border border-[#1B4D3E]/15 p-3.5 text-xs text-[#35443C] space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-bold text-[#1B4D3E] flex items-center gap-1.5">
-                <KeyRound className="w-3.5 h-3.5" />
-                <span>الوضع التجريبي المحلي مفعّل</span>
-              </span>
-              <button
-                type="button"
-                onClick={fillDemoCredentials}
-                className="text-xs font-bold text-[#1B4D3E] underline cursor-pointer"
-              >
-                تعبئة بيانات الدخول التجريبية
-              </button>
-            </div>
-            <p className="text-[#5C6B63] leading-relaxed">
-              البريد: <span dir="ltr" className="font-mono font-semibold">{demoAdminEmail}</span> · كلمة المرور الافتراضية: <span dir="ltr" className="font-mono font-semibold">Admin@1234</span>
-            </p>
-          </div>
-        )}
-
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-bold text-[#35443C] mb-1.5">
+            <label
+              htmlFor="admin-email"
+              className="block text-xs font-bold text-[#35443C] mb-1.5"
+            >
               البريد الإلكتروني للمدير
             </label>
             <input
+              id="admin-email"
               type="email"
               dir="ltr"
+              autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="admin@hara-grill.eg"
+              placeholder="name@restaurant.com"
               className="w-full h-11 px-3.5 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/15 text-sm text-[#18221D] text-left focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/25"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-[#35443C] mb-1.5">
+            <label
+              htmlFor="admin-password"
+              className="block text-xs font-bold text-[#35443C] mb-1.5"
+            >
               كلمة المرور
             </label>
             <input
+              id="admin-password"
               type="password"
               dir="ltr"
+              autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
@@ -141,7 +123,10 @@ export function AdminLogin({
           </div>
 
           {errorMsg && (
-            <div className="rounded-xl bg-[#FEE2E2]/70 border border-[#B91C1C]/20 p-3 text-xs font-semibold text-[#991B1B]">
+            <div
+              role="alert"
+              className="rounded-xl bg-[#FEE2E2]/70 border border-[#B91C1C]/20 p-3 text-xs font-semibold text-[#991B1B]"
+            >
               {errorMsg}
             </div>
           )}
