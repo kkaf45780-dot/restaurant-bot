@@ -812,9 +812,15 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
       const nowIso = new Date().toISOString();
       const orderNumber = String(Math.floor(10000 + Math.random() * 89999));
+      const orderToken = await signOrderToken(
+        secret,
+        bundle.restaurant.id,
+        orderNumber
+      );
       const newOrder: Order = {
         id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         orderNumber,
+        orderToken,
         restaurantId: bundle.restaurant.id,
         customerName: String(customerName).trim(),
         customerPhone: cleanPhone,
@@ -859,11 +865,6 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         savedOrder,
         bundle.restaurant.name,
         bundle.restaurant.systemSettings.currencyLabel
-      );
-      const orderToken = await signOrderToken(
-        secret,
-        bundle.restaurant.id,
-        savedOrder.orderNumber
       );
 
       return Response.json(

@@ -723,9 +723,15 @@ async function startServer(): Promise<void> {
 
       const nowIso = new Date().toISOString();
       const orderNumber = String(Math.floor(10000 + Math.random() * 89999));
+      const orderToken = await signOrderToken(
+        SESSION_SECRET,
+        bundle.restaurant.id,
+        orderNumber
+      );
       const newOrder: Order = {
         id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         orderNumber,
+        orderToken,
         restaurantId: bundle.restaurant.id,
         customerName: String(customerName).trim(),
         customerPhone: cleanPhone,
@@ -771,11 +777,6 @@ async function startServer(): Promise<void> {
         bundle.restaurant.name,
         bundle.restaurant.systemSettings.currencyLabel
       );
-      const orderToken = await signOrderToken(
-        SESSION_SECRET,
-        bundle.restaurant.id,
-        savedOrder.orderNumber
-      );
 
       res.status(201).json({ order: savedOrder, whatsappUrl: whatsappUrl || '', orderToken });
     } catch (err) {
@@ -806,7 +807,7 @@ async function startServer(): Promise<void> {
       const cleanEmail = String(email || '').trim().toLowerCase();
       const cleanPass = String(password || '');
       const expectedEmail = (process.env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-      const isPasswordValid = verifyLocalAdminPassword(cleanPass);
+      const isPasswordValid = await verifyLocalAdminPassword(cleanPass);
 
       if (cleanEmail === expectedEmail && isPasswordValid) {
         const role: EmployeeRole = 'owner';
@@ -1347,9 +1348,9 @@ async function startServer(): Promise<void> {
     '/api/admin/password',
     verifyAdminRequest,
     requirePermission('system'),
-    (req, res) => {
+    async (req, res) => {
       const { currentPassword, newPassword } = req.body ?? {};
-      if (!verifyLocalAdminPassword(String(currentPassword || ''))) {
+      if (!(await verifyLocalAdminPassword(String(currentPassword || '')))) {
         res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
         return;
       }
@@ -1360,7 +1361,7 @@ async function startServer(): Promise<void> {
         });
         return;
       }
-      setLocalAdminPassword(nextPass);
+      await setLocalAdminPassword(nextPass);
       res.json({ ok: true });
     }
   );
