@@ -20,11 +20,11 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { ORDER_STATUS_META, ORDER_TIMELINE_STEPS } from '../../data/restaurant.ts';
 import { submitOrderRating, trackOrderByNumber } from '../../lib/api.ts';
-import { resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { formatCurrency } from '../../lib/pricing.ts';
 import { supabase } from '../../lib/supabase.ts';
 import { buildWhatsAppInquiryUrl } from '../../lib/whatsapp.ts';
 import type { MenuItem, Order, Restaurant } from '../../types/restaurant.ts';
+import { SafeImage } from '../SafeImage.tsx';
 
 interface OrderTrackingViewProps {
   restaurant: Restaurant;
@@ -557,10 +557,11 @@ export function OrderHistoryAndFavoritesView({
                 className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] overflow-hidden shadow-xs p-4 space-y-3"
               >
                 <div className="flex items-center gap-3">
-                  <img
-                    src={resolveAssetUrl(item.imageUrl)}
+                  <SafeImage
+                    src={item.imageUrl}
                     alt={item.name}
                     className="w-20 h-16 rounded-xl object-cover shrink-0 bg-[#F7F3E9] dark:bg-[#0E1713]"
+                    fallbackIconClassName="w-6 h-6"
                   />
                   <div className="min-w-0 flex-1">
                     <h3 className="font-extrabold text-sm text-[#18221D] dark:text-[#ECF3EF] truncate">
@@ -644,7 +645,7 @@ export function OrderHistoryAndFavoritesView({
                 key={ord.id}
                 className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xs"
               >
-                <div className="space-y-1">
+                <div className="space-y-1 min-w-0">
                   <div className="flex items-center gap-2.5 flex-wrap">
                     <span className="font-extrabold text-base text-[#18221D] dark:text-[#ECF3EF] tabular-nums">
                       طلب #{ord.orderNumber}

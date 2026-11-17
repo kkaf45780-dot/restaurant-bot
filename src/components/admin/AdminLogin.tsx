@@ -59,7 +59,7 @@ export function AdminLogin({
   };
 
   return (
-    <div className="min-h-screen bg-[#F8F5EE] flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-[#F8F5EE] text-[#18221D] flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-md bg-white rounded-2xl border border-[#1B4D3E]/15 p-6 sm:p-8 space-y-6">
         <div className="flex items-center justify-between">
           <div className="w-11 h-11 rounded-xl bg-[#1B4D3E] text-white flex items-center justify-center">

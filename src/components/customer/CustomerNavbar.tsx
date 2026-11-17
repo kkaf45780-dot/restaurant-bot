@@ -80,14 +80,14 @@ export function CustomerNavbar({
 
   return (
     <header className="bg-white/95 dark:bg-[#101A15]/95 backdrop-blur-sm border-b border-[#176B45]/10 dark:border-[#2A3F35] sticky top-0 z-40">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 h-[72px] flex items-center justify-between gap-3">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 h-[68px] sm:h-[72px] flex items-center justify-between gap-2 sm:gap-3">
         {/* Brand Logo (Right side in RTL) */}
         <button
           type="button"
           onClick={() => handleNavClick('home')}
-          className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 sm:flex-initial text-right cursor-pointer group"
+          className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 sm:flex-initial text-right cursor-pointer group"
         >
-          <div className="w-11 h-11 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] border border-[#176B45]/15 dark:border-[#2A3F35] overflow-hidden shrink-0 flex items-center justify-center">
+          <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] border border-[#176B45]/15 dark:border-[#2A3F35] overflow-hidden shrink-0 flex items-center justify-center">
             {logoSrc && !logoBroken ? (
               <img
                 src={logoSrc}
@@ -101,10 +101,10 @@ export function CustomerNavbar({
             )}
           </div>
           <div className="min-w-0">
-            <span className="block text-base sm:text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF] truncate group-hover:text-[#176B45] transition-colors">
+            <span className="block text-sm sm:text-lg font-extrabold text-[#104B34] dark:text-[#ECF3EF] truncate group-hover:text-[#176B45] transition-colors">
               {restaurant.name}
             </span>
-            <span className="block text-[11px] font-semibold text-[#5C6B63] dark:text-[#A3B8AE] truncate">
+            <span className="hidden min-[380px]:block text-[11px] font-semibold text-[#5C6B63] dark:text-[#A3B8AE] truncate">
               موظف المطعم الذكي
             </span>
           </div>
@@ -132,7 +132,7 @@ export function CustomerNavbar({
         </nav>
 
         {/* Left Action Cluster */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {/* Open/Closed Status Pill */}
           <div
             className={`hidden xl:inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold border whitespace-nowrap ${
@@ -180,7 +180,7 @@ export function CustomerNavbar({
             onClick={onToggleDark}
             title={isDark ? 'الوضع النهاري' : 'الوضع الليلي'}
             aria-label={isDark ? 'تفعيل الوضع النهاري' : 'تفعيل الوضع الليلي'}
-            className="w-10 h-10 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#FBBF24] border border-[#176B45]/15 dark:border-[#2A3F35] hover:bg-[#EFE9DC] flex items-center justify-center cursor-pointer"
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#FBBF24] border border-[#176B45]/15 dark:border-[#2A3F35] hover:bg-[#EFE9DC] flex items-center justify-center cursor-pointer"
           >
             {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
@@ -191,7 +191,7 @@ export function CustomerNavbar({
             onClick={() => handleNavClick('favorites')}
             title="الأطباق المفضلة"
             aria-label="الأطباق المفضلة"
-            className={`relative w-10 h-10 rounded-xl border flex items-center justify-center transition-colors cursor-pointer ${
+            className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl border flex items-center justify-center transition-colors cursor-pointer ${
               activeRoute === 'favorites'
                 ? 'bg-[#176B45] text-white border-[#176B45]'
                 : 'bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] border-[#176B45]/15 dark:border-[#2A3F35] hover:bg-[#EFE9DC]'
@@ -210,7 +210,7 @@ export function CustomerNavbar({
             type="button"
             onClick={() => handleNavClick('checkout')}
             aria-label={`السلة (${cartCount})`}
-            className={`relative h-10 px-3 rounded-xl border flex items-center gap-1.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+            className={`relative h-9 sm:h-10 px-2.5 sm:px-3 rounded-xl border flex items-center gap-1.5 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
               activeRoute === 'checkout'
                 ? 'bg-[#104B34] text-white border-[#104B34]'
                 : 'bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] border-[#176B45]/15 dark:border-[#2A3F35] hover:bg-[#EFE9DC]'
@@ -219,7 +219,7 @@ export function CustomerNavbar({
             <ShoppingBag className="w-4 h-4" />
             <span className="hidden sm:inline">السلة</span>
             {cartCount > 0 && (
-              <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#176B45] text-white text-[11px] font-extrabold flex items-center justify-center tabular-nums">
+              <span className="min-w-[18px] sm:min-w-[20px] h-[18px] sm:h-5 px-1 sm:px-1.5 rounded-full bg-[#176B45] text-white text-[10px] sm:text-[11px] font-extrabold flex items-center justify-center tabular-nums">
                 {cartCount}
               </span>
             )}
@@ -251,7 +251,7 @@ export function CustomerNavbar({
             type="button"
             onClick={() => setMobileMenuOpen((v) => !v)}
             aria-label="القائمة الرئيسية"
-            className="lg:hidden w-10 h-10 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] border border-[#176B45]/15 dark:border-[#2A3F35] flex items-center justify-center text-[#104B34] dark:text-[#ECF3EF] cursor-pointer"
+            className="lg:hidden w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] border border-[#176B45]/15 dark:border-[#2A3F35] flex items-center justify-center text-[#104B34] dark:text-[#ECF3EF] cursor-pointer"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
@@ -280,8 +280,8 @@ export function CustomerNavbar({
                     : 'bg-[#F7F3E9] dark:bg-[#0E1713] text-[#18221D] dark:text-[#ECF3EF]'
                 }`}
               >
-                <Icon className="w-4 h-4" />
-                <span>{label}</span>
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="truncate">{label}</span>
               </button>
             ))}
           </div>

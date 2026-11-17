@@ -1,7 +1,7 @@
-import { Check, Minus, Plus, UtensilsCrossed, X } from 'lucide-react';
+import { Check, Minus, Plus, X } from 'lucide-react';
 import { useState } from 'react';
-import { resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { formatCurrency, fromPiasters, toPiasters } from '../../lib/pricing.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type { MenuItem, OrderDraftItem } from '../../types/restaurant.ts';
 
 interface ProductDetailsModalProps {
@@ -33,7 +33,6 @@ export function ProductDetailsModal({
   );
   const [itemNotes, setItemNotes] = useState(editingLine?.itemNotes ?? '');
   const [quantity, setQuantity] = useState(editingLine?.quantity ?? 1);
-  const [imgBroken, setImgBroken] = useState(false);
 
   const selectedSize = sizes.find((s) => s.id === selectedSizeId);
   const sizeDelta = selectedSize ? selectedSize.priceDelta : 0;
@@ -70,31 +69,23 @@ export function ProductDetailsModal({
     onClose();
   };
 
-  const imgSrc = resolveAssetUrl(item.imageUrl);
-
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/50 backdrop-blur-[2px] flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-black/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4"
       onClick={onClose}
     >
       <div
-        className="bg-white dark:bg-[#14201B] rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-[#176B45]/15 dark:border-[#2A3F35]"
+        className="bg-white dark:bg-[#14201B] rounded-3xl max-w-xl w-full max-h-[90dvh] overflow-y-auto shadow-2xl border border-[#176B45]/15 dark:border-[#2A3F35]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Image Banner */}
-        <div className="relative h-56 bg-[#F7F3E9] dark:bg-[#0E1713]">
-          {imgSrc && !imgBroken ? (
-            <img
-              src={imgSrc}
-              alt={item.name}
-              onError={() => setImgBroken(true)}
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center text-[#176B45]/40">
-              <UtensilsCrossed className="w-12 h-12" />
-            </div>
-          )}
+        <div className="relative h-48 sm:h-56 bg-[#F7F3E9] dark:bg-[#0E1713] shrink-0">
+          <SafeImage
+            src={item.imageUrl}
+            alt={item.name}
+            className="w-full h-full object-cover"
+            fallbackIconClassName="w-12 h-12"
+          />
           <button
             type="button"
             onClick={onClose}
@@ -116,7 +107,7 @@ export function ProductDetailsModal({
           </span>
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="p-5 sm:p-6 space-y-5">
           {/* Title & Description */}
           <div>
             <div className="flex items-start justify-between gap-4">
@@ -221,7 +212,7 @@ export function ProductDetailsModal({
           </div>
 
           {/* Quantity & Add/Save CTA */}
-          <div className="pt-2 border-t border-[#176B45]/10 dark:border-[#2A3F35] flex items-center gap-3">
+          <div className="sticky bottom-0 -mx-5 sm:-mx-6 px-5 sm:px-6 pb-5 pt-3 -mb-5 sm:-mb-6 bg-white dark:bg-[#14201B] border-t border-[#176B45]/10 dark:border-[#2A3F35] flex items-center gap-2 sm:gap-3">
             <div className="flex items-center gap-1 bg-[#F7F3E9] dark:bg-[#0E1713] border border-[#176B45]/15 dark:border-[#2A3F35] rounded-xl p-1">
               <button
                 type="button"

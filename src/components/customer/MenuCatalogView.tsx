@@ -8,9 +8,9 @@ import {
   Trash2,
   UtensilsCrossed,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import { resolveAssetUrl } from '../../lib/imageAssets.ts';
+import { useEffect, useMemo, useState } from 'react';
 import { buildDraftLineKey, calculateOrderTotals, formatCurrency } from '../../lib/pricing.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type {
   Coupon,
   DeliveryZone,
@@ -57,6 +57,10 @@ export function MenuCatalogView({
   const [selectedCategory, setSelectedCategory] = useState<string>(initialCategoryId);
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyAvailable, setOnlyAvailable] = useState(false);
+
+  useEffect(() => {
+    setSelectedCategory(initialCategoryId);
+  }, [initialCategoryId]);
 
   const isItemAvailable = (item: MenuItem) =>
     item.isAvailable && (typeof item.stockQuantity !== 'number' || item.stockQuantity > 0);
@@ -173,7 +177,6 @@ export function MenuCatalogView({
               {filteredItems.map((item) => {
                 const available = isItemAvailable(item);
                 const isFav = favoriteIds.includes(item.id);
-                const imgSrc = resolveAssetUrl(item.imageUrl);
                 const inCartQty = draft.items
                   .filter((d) => d.itemId === item.id)
                   .reduce((sum, d) => sum + d.quantity, 0);
@@ -190,11 +193,9 @@ export function MenuCatalogView({
                         onClick={() => onSelectItemDetails(item)}
                         className="relative h-44 bg-[#F7F3E9] dark:bg-[#0E1713] cursor-pointer overflow-hidden group"
                       >
-                        <img
-                          src={imgSrc}
+                        <SafeImage
+                          src={item.imageUrl}
                           alt={item.name}
-                          loading="lazy"
-                          decoding="async"
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         />
                         <span
@@ -251,7 +252,7 @@ export function MenuCatalogView({
                         type="button"
                         disabled={!available}
                         onClick={() => onQuickAddItem(item)}
-                        className="flex-1 min-h-[40px] px-3 rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:bg-neutral-300 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-400 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                        className="flex-1 min-h-[40px] px-3 rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:bg-neutral-300 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-400 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:cursor-not-allowed"
                       >
                         <Plus className="w-4 h-4" />
                         <span>{inCartQty > 0 ? `أضف آخر (${inCartQty})` : 'إضافة للطلب'}</span>
@@ -275,7 +276,7 @@ export function MenuCatalogView({
         </div>
 
         {/* Sticky Current Order Sidebar matching Food_menu_website_layout */}
-        <aside className="lg:col-span-4 xl:col-span-3 lg:sticky lg:top-24">
+        <aside className="hidden lg:block lg:col-span-4 xl:col-span-3 lg:sticky lg:top-24">
           <div className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/15 dark:border-[#2A3F35] p-5 shadow-sm space-y-4">
             <div className="flex items-center justify-between border-b border-[#176B45]/10 dark:border-[#2A3F35] pb-3">
               <div>
@@ -421,13 +422,13 @@ export function MenuCatalogView({
       {/* Sticky Mobile Cart Bar */}
       {totals.validItems.length > 0 && (
         <div className="lg:hidden fixed bottom-3 inset-x-3 z-30">
-          <div className="bg-[#104B34] dark:bg-[#14201B] text-white rounded-2xl border border-[#C5A46D]/40 shadow-xl px-4 py-3 flex items-center justify-between gap-3">
+          <div className="bg-[#104B34] dark:bg-[#14201B] text-white rounded-2xl border border-[#C5A46D]/40 shadow-xl px-3.5 sm:px-4 py-2.5 flex items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-9 h-9 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
                 <ShoppingBag className="w-4 h-4 text-[#C5A46D]" />
               </div>
               <div className="min-w-0">
-                <p className="text-[11px] text-white/80 font-bold">
+                <p className="text-[11px] text-white/80 font-bold truncate">
                   {totals.validItems.reduce((sum, l) => sum + l.quantity, 0)} أصناف في السلة
                 </p>
                 <p className="text-sm font-extrabold tabular-nums truncate">
@@ -438,9 +439,10 @@ export function MenuCatalogView({
             <button
               type="button"
               onClick={onGoCheckout}
-              className="min-h-[42px] px-4 rounded-xl bg-[#C5A46D] hover:bg-[#b5935b] text-[#104B34] text-xs font-extrabold whitespace-nowrap cursor-pointer shrink-0"
+              className="min-h-[40px] px-3.5 sm:px-4 rounded-xl bg-[#C5A46D] hover:bg-[#b5935b] text-[#104B34] text-xs font-extrabold whitespace-nowrap cursor-pointer shrink-0"
             >
-              عرض السلة وإتمام الطلب
+              <span className="sm:hidden">إتمام الطلب</span>
+              <span className="hidden sm:inline">عرض السلة وإتمام الطلب</span>
             </button>
           </div>
         </div>

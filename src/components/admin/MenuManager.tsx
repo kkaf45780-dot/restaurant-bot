@@ -9,8 +9,9 @@ import {
   X,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { PRESET_DISH_IMAGES, resolveAssetUrl } from '../../lib/imageAssets.ts';
+import { PRESET_DISH_IMAGES } from '../../lib/imageAssets.ts';
 import { formatCurrency } from '../../lib/pricing.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type {
   MenuCategory,
   MenuItem,
@@ -269,7 +270,7 @@ export function MenuManager({
                 value={itemName}
                 onChange={(e) => setItemName(e.target.value)}
                 placeholder="مثال: كباب وكفتة مشكل على الفحم"
-                className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm"
+                className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
               />
             </div>
 
@@ -282,7 +283,7 @@ export function MenuManager({
                 value={itemDesc}
                 onChange={(e) => setItemDesc(e.target.value)}
                 placeholder="وصف المكونات وطريقة التحضير..."
-                className="w-full p-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm"
+                className="w-full p-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
               />
             </div>
 
@@ -292,7 +293,7 @@ export function MenuManager({
                 <select
                   value={itemCategoryId}
                   onChange={(e) => setItemCategoryId(e.target.value)}
-                  className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-semibold"
+                  className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-semibold text-[#18221D]"
                 >
                   {categories.map((c) => (
                     <option key={c.id} value={c.id}>
@@ -313,7 +314,7 @@ export function MenuManager({
                   required
                   value={itemPrice}
                   onChange={(e) => setItemPrice(e.target.value)}
-                  className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-bold tabular-nums"
+                  className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-bold text-[#18221D] tabular-nums"
                 />
               </div>
             </div>
@@ -328,7 +329,7 @@ export function MenuManager({
                   min="0"
                   value={itemStock}
                   onChange={(e) => setItemStock(e.target.value)}
-                  className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-bold tabular-nums"
+                  className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-bold text-[#18221D] tabular-nums"
                 />
               </div>
               <div>
@@ -340,7 +341,7 @@ export function MenuManager({
                   min="1"
                   value={itemLowThreshold}
                   onChange={(e) => setItemLowThreshold(e.target.value)}
-                  className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-bold tabular-nums"
+                  className="w-full h-11 px-4 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm font-bold text-[#18221D] tabular-nums"
                 />
               </div>
             </div>
@@ -374,10 +375,11 @@ export function MenuManager({
             <div className="space-y-2.5">
               <label className="block text-xs font-extrabold text-[#18221D]">صورة المنتج</label>
               <div className="rounded-2xl border-2 border-dashed border-[#176B45]/25 bg-[#F7F3E9]/60 p-4 text-center space-y-3">
-                <img
-                  src={resolveAssetUrl(itemImageUrl)}
+                <SafeImage
+                  src={itemImageUrl}
                   alt={itemName || 'معاينة'}
-                  className="w-36 h-24 rounded-xl object-cover mx-auto border border-[#176B45]/15"
+                  className="w-36 h-24 rounded-xl object-cover mx-auto border border-[#176B45]/15 bg-[#EFE9DC]"
+                  fallbackIconClassName="w-8 h-8"
                 />
                 <label className="inline-flex items-center gap-2 min-h-[38px] px-4 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-xs font-bold cursor-pointer">
                   <Upload className="w-3.5 h-3.5" />
@@ -417,7 +419,7 @@ export function MenuManager({
                 {itemSizes.map((sz) => (
                   <div
                     key={sz.id}
-                    className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F7F3E9]/70 text-xs"
+                    className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F7F3E9]/70 text-xs text-[#18221D]"
                   >
                     <label className="flex items-center gap-2 font-bold cursor-pointer">
                       <input
@@ -453,14 +455,14 @@ export function MenuManager({
                   value={newSizeLabel}
                   onChange={(e) => setNewSizeLabel(e.target.value)}
                   placeholder="اسم الحجم (مثال: كيلو كامل)"
-                  className="flex-1 h-9 px-2.5 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs"
+                  className="flex-1 h-9 px-2.5 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] placeholder:text-[#7A8880]"
                 />
                 <input
                   type="number"
                   value={newSizeDelta}
                   onChange={(e) => setNewSizeDelta(e.target.value)}
                   placeholder="فرق السعر"
-                  className="w-20 h-9 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs tabular-nums"
+                  className="w-20 h-9 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] placeholder:text-[#7A8880] tabular-nums"
                 />
                 <button
                   type="button"
@@ -481,7 +483,7 @@ export function MenuManager({
                 {itemExtras.map((ex) => (
                   <div
                     key={ex.id}
-                    className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F7F3E9]/70 text-xs"
+                    className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F7F3E9]/70 text-xs text-[#18221D]"
                   >
                     <span className="font-bold">
                       {ex.label}{' '}
@@ -507,7 +509,7 @@ export function MenuManager({
                   value={newExtraLabel}
                   onChange={(e) => setNewExtraLabel(e.target.value)}
                   placeholder="اسم الإضافة (مثال: جبنة سايحة)"
-                  className="flex-1 min-w-[140px] h-9 px-2.5 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs"
+                  className="flex-1 min-w-[140px] h-9 px-2.5 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] placeholder:text-[#7A8880]"
                 />
                 <input
                   type="number"
@@ -515,9 +517,9 @@ export function MenuManager({
                   disabled={newExtraFree}
                   value={newExtraFree ? '0' : newExtraPrice}
                   onChange={(e) => setNewExtraPrice(e.target.value)}
-                  className="w-16 h-9 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs tabular-nums disabled:opacity-50"
+                  className="w-16 h-9 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] tabular-nums disabled:opacity-50"
                 />
-                <label className="flex items-center gap-1 text-[11px] font-bold cursor-pointer">
+                <label className="flex items-center gap-1 text-[11px] font-bold text-[#18221D] cursor-pointer">
                   <input
                     type="checkbox"
                     checked={newExtraFree}
@@ -589,14 +591,14 @@ export function MenuManager({
             value={catName}
             onChange={(e) => setCatName(e.target.value)}
             placeholder="اسم القسم (مثال: طواجن الفخار)"
-            className="h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm"
+            className="h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
           />
           <input
             type="text"
             value={catDesc}
             onChange={(e) => setCatDesc(e.target.value)}
             placeholder="وصف مختصر للقسم (اختياري)"
-            className="h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm"
+            className="h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
           />
           <div className="flex gap-2">
             <button
@@ -614,7 +616,7 @@ export function MenuManager({
                   setCatName('');
                   setCatDesc('');
                 }}
-                className="px-3 h-11 rounded-xl bg-[#F7F3E9] text-xs font-bold cursor-pointer"
+                className="px-3 h-11 rounded-xl bg-[#F7F3E9] text-xs font-bold text-[#18221D] cursor-pointer"
               >
                 إلغاء
               </button>
@@ -671,13 +673,13 @@ export function MenuManager({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="البحث عن منتج..."
-              className="w-full h-10 pr-10 pl-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-sm"
+              className="w-full h-10 pr-10 pl-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-sm text-[#18221D] placeholder:text-[#7A8880]"
             />
           </div>
           <select
             value={filterAvail}
             onChange={(e) => setFilterAvail(e.target.value as typeof filterAvail)}
-            className="h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-xs font-bold"
+            className="h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-xs font-bold text-[#18221D]"
           >
             <option value="all">الحالة: الكل</option>
             <option value="available">متوفر فقط</option>
@@ -738,10 +740,11 @@ export function MenuManager({
                   <tr key={item.id} className="hover:bg-[#F7F3E9]/50">
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-3">
-                        <img
-                          src={resolveAssetUrl(item.imageUrl)}
+                        <SafeImage
+                          src={item.imageUrl}
                           alt={item.name}
                           className="w-14 h-11 rounded-xl object-cover bg-[#EFE9DC] shrink-0"
+                          fallbackIconClassName="w-5 h-5"
                         />
                         <div>
                           <p className="font-extrabold text-[#18221D]">{item.name}</p>

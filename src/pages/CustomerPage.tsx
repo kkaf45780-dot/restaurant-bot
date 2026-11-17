@@ -648,6 +648,9 @@ export function CustomerPage({
         onOpenShareQr={() => setShareModalOpen(true)}
         onInstallApp={handleInstallClick}
         onNavigate={(nextRoute) => {
+          if (nextRoute === 'menu') {
+            setMenuInitialCat('all');
+          }
           if (nextRoute === 'checkout') {
             setConfirmedOrderState(null);
           }

@@ -188,8 +188,8 @@ export function OverviewSection({
                   const meta = ORDER_STATUS_META[ord.status];
                   return (
                     <tr key={ord.id} className="hover:bg-[#F7F3E9]/50">
-                      <td className="py-3 px-4 font-extrabold tabular-nums">#{ord.orderNumber}</td>
-                      <td className="py-3 px-4 font-semibold">{ord.customerName}</td>
+                      <td className="py-3 px-4 font-extrabold text-[#18221D] tabular-nums">#{ord.orderNumber}</td>
+                      <td className="py-3 px-4 font-semibold text-[#18221D]">{ord.customerName}</td>
                       <td className="py-3 px-4 text-xs text-[#5C6B63] tabular-nums">
                         {new Date(ord.createdAt).toLocaleTimeString('ar-EG', {
                           hour: '2-digit',
@@ -306,10 +306,14 @@ export function OverviewSection({
                   <span className="text-[#176B45] tabular-nums">{dish.qty} طلبات</span>
                 </div>
                 <div className="h-2.5 rounded-full bg-[#F3F4F2] overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-[#104B34]"
-                    style={{ width: `${dish.percent}%` }}
-                  />
+                  <svg
+                    viewBox="0 0 100 10"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                    className="w-full h-full block"
+                  >
+                    <rect x="0" y="0" width={Math.max(0, Math.min(100, dish.percent))} height="10" rx="5" fill="#104B34" />
+                  </svg>
                 </div>
               </div>
             ))}
@@ -410,19 +414,19 @@ export function OrdersSection({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="البحث عن رقم طلب، عميل، هاتف..."
-            className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-sm focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
+            className="w-full h-11 pr-10 pl-4 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-sm text-[#18221D] placeholder:text-[#7A8880] focus:outline-none focus:ring-2 focus:ring-[#176B45]/25"
           />
         </div>
         <input
           type="date"
           value={dateFilter}
           onChange={(e) => setDateFilter(e.target.value)}
-          className="h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-xs font-bold tabular-nums"
+          className="h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-xs font-bold text-[#18221D] tabular-nums"
         />
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="h-11 px-4 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-xs sm:text-sm font-bold focus:outline-none"
+          className="h-11 px-4 rounded-xl bg-[#F7F3E9] border border-[#176B45]/10 text-xs sm:text-sm font-bold text-[#18221D] focus:outline-none"
         >
           <option value="all">كل الحالات ({orders.length})</option>
           {(Object.keys(ORDER_STATUS_META) as OrderStatus[]).map((st) => (
@@ -469,7 +473,7 @@ export function OrdersSection({
                           isSelected ? 'bg-[#176B45]/8' : 'hover:bg-[#F7F3E9]/60'
                         }`}
                       >
-                        <td className="py-3.5 px-4 font-extrabold tabular-nums">
+                        <td className="py-3.5 px-4 font-extrabold text-[#18221D] tabular-nums">
                           #{ord.orderNumber}
                         </td>
                         <td className="py-3.5 px-4">
@@ -528,13 +532,13 @@ export function OrdersSection({
                 <button
                   type="button"
                   onClick={() => setSelectedOrderId(null)}
-                  className="lg:hidden w-8 h-8 rounded-lg bg-[#F7F3E9] flex items-center justify-center"
+                  className="lg:hidden w-8 h-8 rounded-lg bg-[#F7F3E9] text-[#18221D] flex items-center justify-center"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
-              <div className="bg-[#FAF7F0] rounded-xl p-3.5 text-xs space-y-1.5">
+              <div className="bg-[#FAF7F0] rounded-xl p-3.5 text-xs text-[#18221D] space-y-1.5">
                 <p>
                   <strong>اسم العميل:</strong> {selectedOrder.customerName}
                 </p>

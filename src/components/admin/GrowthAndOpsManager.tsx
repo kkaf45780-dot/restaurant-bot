@@ -75,7 +75,7 @@ export function InventorySection({
           <select
             value={selectedItemId}
             onChange={(e) => setSelectedItemId(e.target.value)}
-            className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm font-bold"
+            className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm font-bold text-[#18221D]"
           >
             {items.map((it) => (
               <option key={it.id} value={it.id}>
@@ -92,7 +92,7 @@ export function InventorySection({
             type="number"
             value={delta}
             onChange={(e) => setDelta(e.target.value)}
-            className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm font-bold tabular-nums"
+            className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm font-bold text-[#18221D] tabular-nums"
           />
         </div>
         <div>
@@ -101,7 +101,7 @@ export function InventorySection({
             type="text"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm"
+            className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D]"
           />
         </div>
         <button
@@ -116,7 +116,7 @@ export function InventorySection({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Current Stock Table */}
         <div className="lg:col-span-6 bg-white rounded-2xl border border-[#176B45]/10 overflow-hidden shadow-xs">
-          <div className="px-5 py-3.5 border-b border-[#176B45]/10 flex items-center gap-2 font-extrabold text-sm">
+          <div className="px-5 py-3.5 border-b border-[#176B45]/10 flex items-center gap-2 font-extrabold text-sm text-[#18221D]">
             <Package className="w-4 h-4 text-[#176B45]" />
             <span>أرصدة الأصناف الحالية</span>
           </div>
@@ -166,7 +166,7 @@ export function InventorySection({
 
         {/* Movements Log */}
         <div className="lg:col-span-6 bg-white rounded-2xl border border-[#176B45]/10 overflow-hidden shadow-xs">
-          <div className="px-5 py-3.5 border-b border-[#176B45]/10 font-extrabold text-sm">
+          <div className="px-5 py-3.5 border-b border-[#176B45]/10 font-extrabold text-sm text-[#18221D]">
             سجل حركات المخزون
           </div>
           <div className="divide-y divide-[#176B45]/10 max-h-[420px] overflow-y-auto">
@@ -275,7 +275,7 @@ export function CouponsSection({
             value={code}
             onChange={(e) => setCode(e.target.value)}
             placeholder="GRILL20"
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm uppercase font-bold"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880] uppercase font-bold"
           />
         </div>
         <div>
@@ -283,7 +283,7 @@ export function CouponsSection({
           <select
             value={discountType}
             onChange={(e) => setDiscountType(e.target.value as 'percentage' | 'fixed')}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold text-[#18221D]"
           >
             <option value="percentage">نسبة مئوية (٪)</option>
             <option value="fixed">مبلغ ثابت ({currency})</option>
@@ -297,7 +297,7 @@ export function CouponsSection({
             required
             value={discountValue}
             onChange={(e) => setDiscountValue(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm tabular-nums"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] tabular-nums"
           />
         </div>
         <div>
@@ -307,7 +307,7 @@ export function CouponsSection({
             min="0"
             value={minOrderAmount}
             onChange={(e) => setMinOrderAmount(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm tabular-nums"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] tabular-nums"
           />
         </div>
         <div>
@@ -316,7 +316,7 @@ export function CouponsSection({
             type="date"
             value={validUntil}
             onChange={(e) => setValidUntil(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs tabular-nums"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] tabular-nums"
           />
         </div>
         <button
@@ -333,7 +333,7 @@ export function CouponsSection({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="وصف العرض للعملاء (مثال: خصم ١٥٪ على جميع الطلبات)"
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] placeholder:text-[#7A8880]"
           />
         </div>
       </form>
@@ -361,15 +361,15 @@ export function CouponsSection({
                     </span>
                     <p className="text-[11px] text-[#5C6B63] mt-1">{cp.description}</p>
                   </td>
-                  <td className="py-3.5 px-4 font-bold tabular-nums">
+                  <td className="py-3.5 px-4 font-bold text-[#18221D] tabular-nums">
                     {cp.discountType === 'percentage'
                       ? `${cp.discountValue}٪`
                       : formatCurrency(cp.discountValue, currency)}
                   </td>
-                  <td className="py-3.5 px-4 tabular-nums">
+                  <td className="py-3.5 px-4 text-[#18221D] tabular-nums">
                     {formatCurrency(cp.minOrderAmount, currency)}
                   </td>
-                  <td className="py-3.5 px-4 text-xs tabular-nums">
+                  <td className="py-3.5 px-4 text-xs text-[#35443C] tabular-nums">
                     {cp.usedCount ?? 0} / {cp.usageLimit || '∞'}
                   </td>
                   <td className="py-3.5 px-4">
@@ -666,7 +666,7 @@ export function EmployeesAndLogsSection({
             required
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D]"
           />
         </div>
         <div>
@@ -677,7 +677,7 @@ export function EmployeesAndLogsSection({
             dir="ltr"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-left"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left"
           />
         </div>
         <div>
@@ -687,7 +687,7 @@ export function EmployeesAndLogsSection({
             dir="ltr"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-left tabular-nums"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left tabular-nums"
           />
         </div>
         <div>
@@ -695,7 +695,7 @@ export function EmployeesAndLogsSection({
           <select
             value={role}
             onChange={(e) => setRole(e.target.value as EmployeeRole)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold"
+            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold text-[#18221D]"
           >
             {(Object.keys(ROLE_LABELS_AR) as EmployeeRole[]).map((r) => (
               <option key={r} value={r}>
@@ -715,7 +715,7 @@ export function EmployeesAndLogsSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         <div className="lg:col-span-7 bg-white rounded-2xl border border-[#176B45]/10 overflow-hidden shadow-xs">
-          <div className="px-5 py-3.5 border-b border-[#176B45]/10 flex items-center gap-2 font-extrabold text-sm">
+          <div className="px-5 py-3.5 border-b border-[#176B45]/10 flex items-center gap-2 font-extrabold text-sm text-[#18221D]">
             <Users className="w-4 h-4 text-[#176B45]" />
             <span>فريق العمل ({employees.length})</span>
           </div>
@@ -752,7 +752,7 @@ export function EmployeesAndLogsSection({
         </div>
 
         <div className="lg:col-span-5 bg-white rounded-2xl border border-[#176B45]/10 overflow-hidden shadow-xs">
-          <div className="px-5 py-3.5 border-b border-[#176B45]/10 flex items-center gap-2 font-extrabold text-sm">
+          <div className="px-5 py-3.5 border-b border-[#176B45]/10 flex items-center gap-2 font-extrabold text-sm text-[#18221D]">
             <Activity className="w-4 h-4 text-[#176B45]" />
             <span>سجل النشاط الأخير</span>
           </div>

@@ -18,6 +18,7 @@ import { formatTimeArabic12h } from '../../lib/hours.ts';
 import { HERO_PLATTER_IMAGE_PATH, resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { formatCurrency } from '../../lib/pricing.ts';
 import { buildWhatsAppInquiryUrl } from '../../lib/whatsapp.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type {
   Coupon,
   MenuCategory,
@@ -135,7 +136,7 @@ export function HomepageView({
             <div className="relative w-full max-w-[490px] aspect-[4/3] flex items-center justify-center">
               <div className="absolute w-[78%] aspect-square rounded-full bg-[#176B45] opacity-95 -translate-x-4 translate-y-2" />
               <div className="absolute w-[66%] aspect-square rounded-full border-2 border-[#C5A46D]/40 translate-x-6 -translate-y-4" />
-              <div className="relative z-10 w-[88%] h-[84%] rounded-3xl overflow-hidden shadow-2xl border-4 border-white bg-[#104B34]">
+              <div className="relative z-10 w-[88%] h-[84%] rounded-3xl overflow-hidden shadow-2xl border-4 border-white dark:border-[#1E3129] bg-[#104B34]">
                 {heroSrc && !heroImgBroken ? (
                   <img
                     src={heroSrc}
@@ -185,24 +186,23 @@ export function HomepageView({
                 key={cat.id}
                 type="button"
                 onClick={() => onNavigateMenuCategory(cat.id)}
-                className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] hover:border-[#176B45]/40 p-3 sm:p-4 flex items-center justify-between gap-2.5 sm:gap-3 text-right shadow-xs hover:shadow-md transition-all cursor-pointer group min-w-0"
+                className="bg-white dark:bg-[#14201B] rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] hover:border-[#176B45]/40 p-3.5 sm:p-4 flex flex-col-reverse sm:flex-row items-center sm:justify-between gap-2.5 sm:gap-3 text-center sm:text-right shadow-xs hover:shadow-md transition-all cursor-pointer group min-w-0"
               >
-                <div className="min-w-0">
-                  <p className="font-extrabold text-xs sm:text-sm text-[#18221D] dark:text-[#ECF3EF] group-hover:text-[#176B45] dark:group-hover:text-[#4ADE80] truncate">
+                <div className="min-w-0 w-full sm:w-auto">
+                  <p className="font-extrabold text-xs sm:text-sm text-[#18221D] dark:text-[#ECF3EF] group-hover:text-[#176B45] dark:group-hover:text-[#4ADE80] leading-snug sm:truncate">
                     {cat.name}
                   </p>
                   <p className="text-[11px] sm:text-xs text-[#5C6B63] dark:text-[#A3B8AE] mt-0.5 tabular-nums">
                     {count} أصناف
                   </p>
                 </div>
-                <div className="w-11 h-11 sm:w-14 sm:h-14 rounded-full overflow-hidden border-2 border-[#F7F3E9] dark:border-[#2A3F35] shrink-0 bg-[#F7F3E9] dark:bg-[#0E1713]">
-                  <img
+                <div className="w-14 h-14 rounded-full overflow-hidden border-2 border-[#F7F3E9] dark:border-[#2A3F35] shrink-0 bg-[#F7F3E9] dark:bg-[#0E1713]">
+                  <SafeImage
                     src={thumb}
                     alt={cat.name}
                     width={56}
                     height={56}
-                    loading="lazy"
-                    decoding="async"
+                    iconClassName="w-5 h-5"
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                   />
                 </div>
@@ -228,7 +228,6 @@ export function HomepageView({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {popularItems.map((item) => {
             const isFav = favoriteIds.includes(item.id);
-            const imgSrc = resolveAssetUrl(item.imageUrl);
             return (
               <div
                 key={item.id}
@@ -237,13 +236,11 @@ export function HomepageView({
                 <div>
                   <div
                     onClick={() => onSelectItemDetails(item)}
-                    className="relative h-48 bg-[#F7F3E9] cursor-pointer overflow-hidden group"
+                    className="relative h-48 bg-[#F7F3E9] dark:bg-[#0E1713] cursor-pointer overflow-hidden group"
                   >
-                    <img
-                      src={imgSrc}
+                    <SafeImage
+                      src={item.imageUrl}
                       alt={item.name}
-                      loading="lazy"
-                      decoding="async"
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                     />
                     <span className="absolute bottom-3 right-3 px-2.5 py-1 rounded-full bg-[#176B45] text-white text-[11px] font-bold">

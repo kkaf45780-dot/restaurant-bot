@@ -19,9 +19,9 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import type { RestaurantHoursStatus } from '../../lib/hours.ts';
 import { formatTimeArabic12h } from '../../lib/hours.ts';
-import { resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { formatCurrency } from '../../lib/pricing.ts';
 import { buildWhatsAppInquiryUrl } from '../../lib/whatsapp.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type {
   ChatChallengeResponse,
   ChatMessage,
@@ -200,7 +200,7 @@ export function AIChatView({
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Main Chat Pane (8 cols) */}
-        <section className="lg:col-span-8 bg-white dark:bg-[#14201B] rounded-3xl border border-[#C5A46D]/40 dark:border-[#2A3F35] shadow-sm flex flex-col h-[calc(100dvh-11rem)] min-h-[460px] max-h-[690px] lg:h-[690px] overflow-hidden">
+        <section className="lg:col-span-8 bg-white dark:bg-[#14201B] rounded-3xl border border-[#C5A46D]/40 dark:border-[#2A3F35] shadow-sm flex flex-col h-[calc(100dvh-9.5rem)] min-h-[340px] sm:min-h-[460px] max-h-[680px] lg:h-[680px] overflow-hidden">
           {/* Header */}
           <div className="px-4 sm:px-5 py-3 border-b border-[#176B45]/10 dark:border-[#2A3F35] bg-[#FAF7F0] dark:bg-[#0E1713] flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -319,7 +319,7 @@ export function AIChatView({
                     </div>
 
                     <div
-                      className={`rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap shadow-2xs ${
+                      className={`rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] min-w-0 shadow-2xs ${
                         isUser
                           ? 'bg-white dark:bg-[#192822] border border-[#176B45]/15 dark:border-[#2A3F35] text-[#18221D] dark:text-[#ECF3EF]'
                           : 'bg-[#FAF7F0] dark:bg-[#14201B] border border-[#C5A46D]/40 dark:border-[#2A3F35] text-[#18221D] dark:text-[#ECF3EF]'
@@ -331,7 +331,7 @@ export function AIChatView({
 
                   {/* Quick Pill Actions right below welcome message */}
                   {idx === 0 && !isUser && (
-                    <div className="mt-3 flex flex-wrap gap-2 justify-end pr-0 sm:pr-11">
+                    <div className="mt-3 flex flex-wrap gap-2 justify-end pl-0 sm:pl-11">
                       {quickButtons.map((btn) => (
                         <button
                           key={btn.label}
@@ -348,7 +348,7 @@ export function AIChatView({
 
                   {/* Server-validated Order Draft Diff & Mutation Feedback */}
                   {!isUser && hasChanges && (
-                    <div className="mt-2 mr-0 sm:mr-11 w-full max-w-md bg-white dark:bg-[#14201B] border border-[#C5A46D]/40 dark:border-[#2A3F35] rounded-xl p-3 text-xs space-y-2 shadow-2xs">
+                    <div className="mt-2 ml-0 sm:ml-11 w-full max-w-md bg-white dark:bg-[#14201B] border border-[#C5A46D]/40 dark:border-[#2A3F35] rounded-xl p-3 text-xs space-y-2 shadow-2xs">
                       {msg.appliedChanges && msg.appliedChanges.length > 0 && (
                         <div className="space-y-1">
                           {msg.appliedChanges.map((chg, i) => (
@@ -398,7 +398,7 @@ export function AIChatView({
                     <button
                       type="button"
                       onClick={onGoMenu}
-                      className="mt-2 mr-0 sm:mr-11 inline-flex items-center gap-2 min-h-[38px] px-4 rounded-xl bg-white dark:bg-[#14201B] border border-[#176B45]/25 dark:border-[#2A3F35] text-xs font-bold text-[#104B34] dark:text-[#4ADE80] hover:bg-[#F7F3E9] dark:hover:bg-[#192822] cursor-pointer"
+                      className="mt-2 ml-0 sm:ml-11 inline-flex items-center gap-2 min-h-[38px] px-4 rounded-xl bg-white dark:bg-[#14201B] border border-[#176B45]/25 dark:border-[#2A3F35] text-xs font-bold text-[#104B34] dark:text-[#4ADE80] hover:bg-[#F7F3E9] dark:hover:bg-[#192822] cursor-pointer"
                     >
                       <UtensilsCrossed className="w-3.5 h-3.5" />
                       <span>فتح المنيو الكامل</span>
@@ -409,7 +409,7 @@ export function AIChatView({
                     <button
                       type="button"
                       onClick={onGoCheckout}
-                      className="mt-2 mr-0 sm:mr-11 inline-flex items-center gap-2 min-h-[40px] px-4 rounded-xl bg-[#104B34] text-white text-xs font-bold hover:bg-[#176B45] cursor-pointer"
+                      className="mt-2 ml-0 sm:ml-11 inline-flex items-center gap-2 min-h-[40px] px-4 rounded-xl bg-[#104B34] text-white text-xs font-bold hover:bg-[#176B45] cursor-pointer"
                     >
                       <ShoppingBag className="w-3.5 h-3.5" />
                       <span>الانتقال إلى سلة المشتريات وإتمام الطلب</span>
@@ -421,7 +421,7 @@ export function AIChatView({
                       href={whatsappInquiryUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="mt-2 mr-0 sm:mr-11 inline-flex items-center gap-2 min-h-[38px] px-4 rounded-xl bg-[#16A34A] text-white text-xs font-bold hover:bg-[#15803D]"
+                      className="mt-2 ml-0 sm:ml-11 inline-flex items-center gap-2 min-h-[38px] px-4 rounded-xl bg-[#16A34A] text-white text-xs font-bold hover:bg-[#15803D]"
                     >
                       <span>تواصل عبر واتساب</span>
                       <ExternalLink className="w-3.5 h-3.5" />
@@ -429,7 +429,7 @@ export function AIChatView({
                   )}
 
                   {!isUser && msg.suggestedAction === 'show_hours' && (
-                    <div className="mt-2 mr-0 sm:mr-11 w-full max-w-md bg-white dark:bg-[#14201B] border border-[#176B45]/15 dark:border-[#2A3F35] rounded-xl p-3 text-xs space-y-1.5">
+                    <div className="mt-2 ml-0 sm:ml-11 w-full max-w-md bg-white dark:bg-[#14201B] border border-[#176B45]/15 dark:border-[#2A3F35] rounded-xl p-3 text-xs space-y-1.5">
                       <p className="font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
                         مواعيد العمل ({hoursStatus.statusLabel})
                       </p>
@@ -449,7 +449,7 @@ export function AIChatView({
                   )}
 
                   {!isUser && msg.suggestedAction === 'show_delivery' && (
-                    <div className="mt-2 mr-0 sm:mr-11 w-full max-w-md bg-white dark:bg-[#14201B] border border-[#176B45]/15 dark:border-[#2A3F35] rounded-xl p-3 text-xs space-y-1.5">
+                    <div className="mt-2 ml-0 sm:ml-11 w-full max-w-md bg-white dark:bg-[#14201B] border border-[#176B45]/15 dark:border-[#2A3F35] rounded-xl p-3 text-xs space-y-1.5">
                       <p className="font-extrabold text-[#104B34] dark:text-[#ECF3EF]">
                         مناطق التوصيل المتاحة
                       </p>
@@ -635,15 +635,16 @@ export function AIChatView({
                   className="p-2.5 rounded-xl border border-[#176B45]/10 dark:border-[#2A3F35] bg-[#FAF7F0]/60 dark:bg-[#0E1713] flex items-center justify-between gap-3"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <img
-                      src={resolveAssetUrl(dish.imageUrl)}
-                      alt={dish.name}
-                      width={56}
-                      height={48}
-                      loading="lazy"
-                      decoding="async"
-                      className="w-14 h-12 rounded-lg object-cover shrink-0 bg-[#F7F3E9] dark:bg-[#14201B]"
-                    />
+                    <div className="w-14 h-12 rounded-lg overflow-hidden shrink-0 bg-[#F7F3E9] dark:bg-[#14201B]">
+                      <SafeImage
+                        src={dish.imageUrl}
+                        alt={dish.name}
+                        width={56}
+                        height={48}
+                        iconClassName="w-4 h-4"
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
                     <div className="min-w-0">
                       <p className="text-xs font-extrabold text-[#18221D] dark:text-[#ECF3EF] truncate">
                         {dish.name}

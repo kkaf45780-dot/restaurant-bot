@@ -137,7 +137,7 @@ export function AISettingsSection({
                   model: e.target.value as AISettings['model'],
                 }))
               }
-              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
+              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D]"
             >
               <option value="gemini-4-hydrogen">gemini-4-hydrogen (الافتراضي المتوازن)</option>
               <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (فائق السرعة)</option>
@@ -152,7 +152,7 @@ export function AISettingsSection({
               onChange={(e) =>
                 setAi((prev) => ({ ...prev, tone: e.target.value as AITone }))
               }
-              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
+              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D]"
             >
               <option value="friendly_egyptian">عامية مصرية ودودة وطبيعية</option>
               <option value="concise_practical">مختصر وعملي ومباشر</option>
@@ -167,7 +167,7 @@ export function AISettingsSection({
             rows={2}
             value={ai.welcomeMessage}
             onChange={(e) => setAi((prev) => ({ ...prev, welcomeMessage: e.target.value }))}
-            className="w-full p-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
+            className="w-full p-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D]"
           />
         </div>
 
@@ -220,7 +220,7 @@ export function AISettingsSection({
             rows={2}
             value={ai.customInstructions ?? ''}
             onChange={(e) => setAi((prev) => ({ ...prev, customInstructions: e.target.value }))}
-            className="w-full p-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
+            className="w-full p-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D]"
           />
         </div>
 
@@ -268,7 +268,7 @@ export function AISettingsSection({
                     <td className="py-2.5 px-4 tabular-nums text-[#5C6B63]">
                       {new Date(log.timestamp).toLocaleTimeString('ar-EG')}
                     </td>
-                    <td className="py-2.5 px-4 font-mono">{log.model}</td>
+                    <td className="py-2.5 px-4 font-mono text-[#18221D]">{log.model}</td>
                     <td className="py-2.5 px-4">
                       <span
                         className={`px-2 py-0.5 rounded font-bold ${
@@ -286,7 +286,7 @@ export function AISettingsSection({
                             : 'خطأ'}
                       </span>
                     </td>
-                    <td className="py-2.5 px-4 tabular-nums">{log.latencyMs} ms</td>
+                    <td className="py-2.5 px-4 tabular-nums text-[#18221D]">{log.latencyMs} ms</td>
                     <td className="py-2.5 px-4 text-[#18221D]">
                       {log.errorMessage ? `${log.userMessagePreview} — (${log.errorMessage})` : log.userMessagePreview}
                     </td>
@@ -384,7 +384,7 @@ export function SystemSettingsSection({
               type="text"
               value={sys.currencyLabel}
               onChange={(e) => setSys((p) => ({ ...p, currencyLabel: e.target.value }))}
-              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
+              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D]"
             />
           </div>
           <div>
@@ -394,7 +394,7 @@ export function SystemSettingsSection({
               dir="ltr"
               value={sys.currencyCode}
               onChange={(e) => setSys((p) => ({ ...p, currencyCode: e.target.value }))}
-              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-left"
+              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D] text-left"
             />
           </div>
           <div>
@@ -402,7 +402,7 @@ export function SystemSettingsSection({
             <select
               value={sys.timezone}
               onChange={(e) => setSys((p) => ({ ...p, timezone: e.target.value }))}
-              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm"
+              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D]"
             >
               <option value="Africa/Cairo">Africa/Cairo (القاهرة)</option>
               <option value="Asia/Riyadh">Asia/Riyadh (الرياض)</option>
@@ -421,7 +421,7 @@ export function SystemSettingsSection({
               dir="ltr"
               value={sys.supportEmail}
               onChange={(e) => setSys((p) => ({ ...p, supportEmail: e.target.value }))}
-              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-left"
+              className="w-full h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D] text-left"
             />
           </div>
 
@@ -456,7 +456,7 @@ export function SystemSettingsSection({
         <h3 className="text-base font-bold text-[#18221D]">حالة ربط الخدمات الخارجية</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
           <div className="rounded-xl bg-[#FAF7F0] p-4 space-y-1.5">
-            <div className="flex justify-between font-bold">
+            <div className="flex justify-between font-bold text-[#18221D]">
               <span>قاعدة البيانات والتخزين (Supabase)</span>
               <span
                 className={
@@ -474,7 +474,7 @@ export function SystemSettingsSection({
           </div>
 
           <div className="rounded-xl bg-[#FAF7F0] p-4 space-y-1.5">
-            <div className="flex justify-between font-bold">
+            <div className="flex justify-between font-bold text-[#18221D]">
               <span>خدمة الذكاء الاصطناعي (Gemini API)</span>
               <span
                 className={
@@ -506,7 +506,7 @@ export function SystemSettingsSection({
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder="كلمة المرور الحالية"
-              className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-left"
+              className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D] placeholder:text-[#7A8880] text-left"
             />
             <input
               type="password"
@@ -516,7 +516,7 @@ export function SystemSettingsSection({
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               placeholder="كلمة المرور الجديدة (10 أحرف، كبير وصغير ورقم)"
-              className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-left"
+              className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D] placeholder:text-[#7A8880] text-left"
             />
           </div>
           <button

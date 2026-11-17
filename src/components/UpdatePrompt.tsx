@@ -13,7 +13,7 @@ export function UpdatePrompt() {
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-4 right-4 left-4 sm:left-auto sm:w-96 z-50 bg-[#104B34] dark:bg-[#14201B] text-white rounded-2xl border border-[#C5A46D]/50 shadow-xl p-4 flex items-center justify-between gap-3"
+      className="fixed bottom-24 lg:bottom-4 right-4 left-4 sm:left-auto sm:w-96 z-50 bg-[#104B34] dark:bg-[#14201B] text-white rounded-2xl border border-[#C5A46D]/50 shadow-xl p-4 flex items-center justify-between gap-3"
     >
       <div className="min-w-0">
         <p className="text-xs sm:text-sm font-extrabold">يتوفر تحديث جديد للتطبيق</p>

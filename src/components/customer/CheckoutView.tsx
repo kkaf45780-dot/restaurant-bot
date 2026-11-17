@@ -18,8 +18,8 @@ import {
 import { useMemo, useState } from 'react';
 import { submitOrder, validateCouponCode } from '../../lib/api.ts';
 import type { RestaurantHoursStatus } from '../../lib/hours.ts';
-import { resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { buildDraftLineKey, calculateOrderTotals, formatCurrency } from '../../lib/pricing.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type {
   Coupon,
   DeliveryZone,
@@ -338,17 +338,17 @@ export function CheckoutView({
                 {totals.validItems.map((line) => {
                   const catalogItem = itemCatalogMap.get(line.itemId);
                   const key = line.lineKey || buildDraftLineKey(line);
-                  const thumb = resolveAssetUrl(catalogItem?.imageUrl);
                   return (
                     <div
                       key={key}
                       className="rounded-2xl border border-[#176B45]/10 dark:border-[#2A3F35] bg-[#FAF7F0]/60 dark:bg-[#0E1713] p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                     >
                       <div className="flex items-center gap-3.5 min-w-0">
-                        <img
-                          src={thumb}
+                        <SafeImage
+                          src={catalogItem?.imageUrl}
                           alt={line.name}
-                          className="w-16 h-14 rounded-xl object-cover shrink-0 bg-[#F7F3E9]"
+                          className="w-16 h-14 rounded-xl object-cover shrink-0 bg-[#F7F3E9] dark:bg-[#0E1713]"
+                          fallbackIconClassName="w-6 h-6"
                         />
                         <div className="min-w-0">
                           <p className="font-extrabold text-sm text-[#18221D] dark:text-[#ECF3EF]">
@@ -375,7 +375,7 @@ export function CheckoutView({
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 sm:gap-3 shrink-0">
                         {catalogItem && onEditCartLine && (
                           <button
                             type="button"
@@ -473,7 +473,7 @@ export function CheckoutView({
                 </h2>
 
                 {/* Fulfillment Type Toggle */}
-                <div className="inline-grid grid-cols-2 gap-1.5 bg-[#F7F3E9] dark:bg-[#0E1713] p-1 rounded-xl border border-[#176B45]/15 dark:border-[#2A3F35]">
+                <div className="grid sm:inline-grid grid-cols-2 w-full sm:w-auto gap-1.5 bg-[#F7F3E9] dark:bg-[#0E1713] p-1 rounded-xl border border-[#176B45]/15 dark:border-[#2A3F35]">
                   <button
                     type="button"
                     onClick={() =>

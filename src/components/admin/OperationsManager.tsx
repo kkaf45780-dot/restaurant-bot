@@ -1,7 +1,7 @@
 import { Edit3, Plus, Trash2, Upload } from 'lucide-react';
 import { useState } from 'react';
-import { resolveAssetUrl } from '../../lib/imageAssets.ts';
 import { formatCurrency } from '../../lib/pricing.ts';
+import { SafeImage } from '../SafeImage.tsx';
 import type {
   DaySchedule,
   DeliveryZone,
@@ -138,7 +138,7 @@ export function DeliveryAndBranchesSection({
                 value={zoneName}
                 onChange={(e) => setZoneName(e.target.value)}
                 placeholder="مثال: الزمالك"
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
               />
             </div>
             <div>
@@ -151,7 +151,7 @@ export function DeliveryAndBranchesSection({
                 required
                 value={zoneFee}
                 onChange={(e) => setZoneFee(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm tabular-nums"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D] tabular-nums"
               />
             </div>
             <div>
@@ -163,7 +163,7 @@ export function DeliveryAndBranchesSection({
                 min="0"
                 value={zoneMinOrder}
                 onChange={(e) => setZoneMinOrder(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm tabular-nums"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D] tabular-nums"
               />
             </div>
             <div>
@@ -174,7 +174,7 @@ export function DeliveryAndBranchesSection({
                 type="text"
                 value={zoneEta}
                 onChange={(e) => setZoneEta(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D]"
               />
             </div>
             <div className="flex gap-2">
@@ -188,7 +188,7 @@ export function DeliveryAndBranchesSection({
               <button
                 type="button"
                 onClick={() => setShowZoneForm(false)}
-                className="px-3 h-10 rounded-xl bg-white text-xs font-bold cursor-pointer"
+                className="px-3 h-10 rounded-xl bg-white text-[#18221D] text-xs font-bold cursor-pointer"
               >
                 إلغاء
               </button>
@@ -305,7 +305,7 @@ export function DeliveryAndBranchesSection({
                 value={branchName}
                 onChange={(e) => setBranchName(e.target.value)}
                 placeholder="مثال: فرع المعادي"
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
               />
             </div>
             <div className="sm:col-span-2">
@@ -314,7 +314,7 @@ export function DeliveryAndBranchesSection({
                 type="text"
                 value={branchAddress}
                 onChange={(e) => setBranchAddress(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D]"
               />
             </div>
             <div>
@@ -323,7 +323,7 @@ export function DeliveryAndBranchesSection({
                 type="text"
                 value={branchHours}
                 onChange={(e) => setBranchHours(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm"
+                className="w-full h-10 px-3 rounded-xl bg-white border border-[#176B45]/15 text-sm text-[#18221D]"
               />
             </div>
             <div className="flex gap-2">
@@ -337,7 +337,7 @@ export function DeliveryAndBranchesSection({
               <button
                 type="button"
                 onClick={() => setShowBranchForm(false)}
-                className="px-3 h-10 rounded-xl bg-white text-xs font-bold cursor-pointer"
+                className="px-3 h-10 rounded-xl bg-white text-[#18221D] text-xs font-bold cursor-pointer"
               >
                 إلغاء
               </button>
@@ -533,7 +533,7 @@ export function RestaurantSettingsSection({
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm"
+              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D]"
             />
           </div>
 
@@ -542,7 +542,7 @@ export function RestaurantSettingsSection({
             <select
               value={manualStatus}
               onChange={(e) => setManualStatus(e.target.value as ManualRestaurantStatus)}
-              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-xs font-bold"
+              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-xs font-bold text-[#18221D]"
             >
               <option value="auto">تلقائي حسب جدول العمل</option>
               <option value="force_open">مفتوح (تجاوز يدوي)</option>
@@ -553,10 +553,11 @@ export function RestaurantSettingsSection({
           <div>
             <label className="block text-xs font-bold text-[#5C6B63] mb-1.5">شعار المطعم</label>
             <div className="flex items-center gap-3 p-3 rounded-xl border border-dashed border-[#176B45]/25 bg-[#F7F3E9]/40">
-              <img
-                src={resolveAssetUrl(logoUrl)}
+              <SafeImage
+                src={logoUrl}
                 alt={name}
-                className="w-14 h-14 rounded-full object-cover border border-[#176B45]/15 shrink-0"
+                className="w-14 h-14 rounded-full object-cover border border-[#176B45]/15 shrink-0 bg-[#EFE9DC]"
+                fallbackIconClassName="w-6 h-6"
               />
               <label className="inline-flex items-center gap-1.5 text-xs font-bold text-[#176B45] cursor-pointer hover:underline">
                 <Upload className="w-4 h-4" />
@@ -577,7 +578,7 @@ export function RestaurantSettingsSection({
               required
               value={address}
               onChange={(e) => setAddress(e.target.value)}
-              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm"
+              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D]"
             />
           </div>
           <div>
@@ -588,7 +589,7 @@ export function RestaurantSettingsSection({
               required
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-left tabular-nums"
+              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D] text-left tabular-nums"
             />
           </div>
           <div>
@@ -601,7 +602,7 @@ export function RestaurantSettingsSection({
               required
               value={whatsappNumber}
               onChange={(e) => setWhatsappNumber(e.target.value)}
-              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-left tabular-nums"
+              className="w-full h-11 px-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D] text-left tabular-nums"
             />
           </div>
         </div>
@@ -624,7 +625,7 @@ export function RestaurantSettingsSection({
               rows={5}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full p-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm"
+              className="w-full p-3 rounded-xl bg-[#F7F3E9]/60 border border-[#176B45]/15 text-sm text-[#18221D]"
             />
           </div>
         </div>
@@ -661,14 +662,14 @@ export function RestaurantSettingsSection({
                       type="time"
                       value={day.openTime}
                       onChange={(e) => updateDay(idx, { openTime: e.target.value })}
-                      className="h-9 px-2.5 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 tabular-nums"
+                      className="h-9 px-2.5 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-[#18221D] tabular-nums"
                     />
                     <span className="text-[#5C6B63]">إلى</span>
                     <input
                       type="time"
                       value={day.closeTime}
                       onChange={(e) => updateDay(idx, { closeTime: e.target.value })}
-                      className="h-9 px-2.5 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 tabular-nums"
+                      className="h-9 px-2.5 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-[#18221D] tabular-nums"
                     />
                   </div>
                 ) : (
@@ -686,17 +687,17 @@ export function RestaurantSettingsSection({
               type="date"
               value={excDate}
               onChange={(e) => setExcDate(e.target.value)}
-              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm tabular-nums"
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] tabular-nums"
             />
             <input
               type="text"
               value={excLabel}
               onChange={(e) => setExcLabel(e.target.value)}
               placeholder="المناسبة (مثال: أول أيام العيد)"
-              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm"
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] placeholder:text-[#7A8880]"
             />
             <div className="flex items-center justify-between gap-2">
-              <label className="flex items-center gap-2 text-xs font-bold cursor-pointer">
+              <label className="flex items-center gap-2 text-xs font-bold text-[#18221D] cursor-pointer">
                 <input
                   type="checkbox"
                   checked={excClosed}
@@ -711,13 +712,13 @@ export function RestaurantSettingsSection({
                     type="time"
                     value={excOpen}
                     onChange={(e) => setExcOpen(e.target.value)}
-                    className="h-8 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs"
+                    className="h-8 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D]"
                   />
                   <input
                     type="time"
                     value={excClose}
                     onChange={(e) => setExcClose(e.target.value)}
-                    className="h-8 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs"
+                    className="h-8 px-2 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D]"
                   />
                 </div>
               )}

@@ -63,8 +63,8 @@ import {
   getStoredAdminToken,
   setStoredAdminToken,
 } from '../lib/api.ts';
+import { SafeImage } from '../components/SafeImage.tsx';
 import type { RestaurantHoursStatus } from '../lib/hours.ts';
-import { resolveAssetUrl } from '../lib/imageAssets.ts';
 import { hasPermission, ROLE_LABELS_AR } from '../lib/permissions.ts';
 import { supabase } from '../lib/supabase.ts';
 import type {
@@ -492,11 +492,12 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   const renderSidebarContent = () => (
     <div className="flex flex-col h-full justify-between p-4 text-white">
       <div className="space-y-5 overflow-y-auto pl-1">
-        <div className="flex items-center gap-3 px-2 pt-1">
-          <img
-            src={resolveAssetUrl(bundle.restaurant.logoUrl)}
+        <div className="flex items-center gap-3 px-2 pt-1 pl-10 lg:pl-2">
+          <SafeImage
+            src={bundle.restaurant.logoUrl}
             alt={bundle.restaurant.name}
-            className="w-10 h-10 rounded-xl object-cover border border-white/25 shrink-0"
+            className="w-10 h-10 rounded-xl object-cover border border-white/25 shrink-0 bg-[#176B45]"
+            fallbackIconClassName="w-5 h-5 text-white/70"
           />
           <div className="min-w-0">
             <p className="text-base font-extrabold tracking-tight leading-tight">موظف المطعم</p>
@@ -573,7 +574,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
       {/* Mobile Drawer */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-50 lg:hidden flex">
-          <div className="w-68 bg-[#104B34] h-full relative z-10">
+          <div className="w-72 max-w-[85vw] bg-[#104B34] h-full relative z-10">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(false)}
@@ -613,7 +614,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
                 />
                 <span>{hoursStatus.statusLabel}</span>
                 {hoursStatus.reasonText && (
-                  <span className="text-[#5C6B63] font-semibold">· {hoursStatus.reasonText}</span>
+                  <span className="hidden sm:inline text-[#5C6B63] font-semibold">· {hoursStatus.reasonText}</span>
                 )}
               </div>
             </div>
@@ -651,7 +652,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
               </button>
 
               {notifOpen && (
-                <div className="absolute left-0 mt-2 w-80 bg-white rounded-2xl border border-[#176B45]/15 shadow-lg z-40 overflow-hidden">
+                <div className="fixed sm:absolute inset-x-3 sm:inset-x-auto sm:left-0 top-[68px] sm:top-auto sm:mt-2 w-auto sm:w-80 bg-white rounded-2xl border border-[#176B45]/15 shadow-lg z-40 overflow-hidden">
                   <div className="px-4 py-3 border-b border-[#176B45]/10 flex items-center justify-between">
                     <span className="text-xs font-extrabold text-[#18221D]">الإشعارات</span>
                     {unreadNotifications > 0 && (
