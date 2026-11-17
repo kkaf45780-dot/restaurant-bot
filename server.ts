@@ -399,15 +399,48 @@ async function startServer(): Promise<void> {
     }
   });
 
-  // Public Order Rating (available after delivery)
+  // Public Order Rating (available after delivery, protected by signed orderToken)
   app.post('/api/orders/:orderNumber/rate', async (req, res) => {
     try {
-      const { restaurantId = DEFAULT_RESTAURANT_ID, rating, comment = '' } = req.body ?? {};
+      res.setHeader('Cache-Control', 'no-store');
+      const clientIp = getRequestClientIp(req);
+      const ipHash = await hashIpForLog(clientIp);
+      const rl = await checkSlidingRateLimit(`rate:${ipHash}`, 20, 60);
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', String(rl.retryAfterSeconds));
+        res.status(429).json({ error: 'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.' });
+        return;
+      }
+
+      const {
+        restaurantId = DEFAULT_RESTAURANT_ID,
+        rating,
+        comment = '',
+        token = '',
+      } = req.body ?? {};
       const bundle = await findRestaurantBundle(String(restaurantId || DEFAULT_RESTAURANT_ID));
       if (!bundle) {
         res.status(404).json({ error: 'المطعم غير موجود' });
         return;
       }
+
+      const cleanToken = String(token || '').trim();
+      if (!cleanToken) {
+        res.status(400).json({ error: 'رمز التتبع السري (orderToken) مطلوب لتقييم الطلب.' });
+        return;
+      }
+
+      const validToken = await verifyOrderToken(
+        SESSION_SECRET,
+        cleanToken,
+        bundle.restaurant.id,
+        req.params.orderNumber
+      );
+      if (!validToken) {
+        res.status(403).json({ error: 'رمز التتبع غير صالح لتقييم هذا الطلب.' });
+        return;
+      }
+
       const numRating = Math.trunc(Number(rating));
       if (!Number.isFinite(numRating) || numRating < 1 || numRating > 5) {
         res.status(400).json({ error: 'يُرجى اختيار تقييم من 1 إلى 5 نجوم.' });
@@ -415,9 +448,10 @@ async function startServer(): Promise<void> {
       }
       const updated = await rateOrder(
         bundle.restaurant.id,
-        req.params.orderNumber,
+        cleanToken,
         numRating,
-        String(comment || '')
+        String(comment || ''),
+        req.params.orderNumber
       );
       if (!updated) {
         res.status(404).json({ error: 'لم يتم العثور على الطلب.' });

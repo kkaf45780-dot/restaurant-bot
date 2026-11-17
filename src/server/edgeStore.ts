@@ -1124,19 +1124,31 @@ export async function rateOrderByToken(
   restaurantId: string,
   orderToken: string,
   rating: number,
-  comment: string
+  comment: string,
+  orderNumber?: string
 ): Promise<Order | null> {
   const cleanToken = orderToken.trim();
-  if (!cleanToken) return null;
+  const cleanOrderNumber = (orderNumber || '').replace(/^#/, '').trim();
+  if (!cleanToken && !cleanOrderNumber) return null;
   const db = await readEdgeDb(env);
   const idx = db.orders.findIndex(
-    (o) => o.restaurantId === restaurantId && o.orderToken === cleanToken
+    (o) =>
+      o.restaurantId === restaurantId &&
+      ((cleanToken && o.orderToken === cleanToken) ||
+        (cleanOrderNumber && (o.orderNumber === cleanOrderNumber || o.id === cleanOrderNumber)))
   );
 
   const supabase = getSupabaseAdminClient(env);
   let target: Order | null = idx >= 0 ? db.orders[idx] : null;
-  if (!target && supabase) {
+  if (!target && supabase && cleanToken) {
     target = await findOrderByTokenSupabase(supabase, restaurantId, cleanToken);
+  }
+  if (!target && supabase && cleanOrderNumber) {
+    const orders = await listOrders(env, restaurantId);
+    target =
+      orders.find(
+        (o) => o.orderNumber === cleanOrderNumber || o.id === cleanOrderNumber
+      ) ?? null;
   }
   if (!target) return null;
 
@@ -1181,9 +1193,10 @@ export async function rateOrder(
   restaurantId: string,
   orderToken: string,
   rating: number,
-  comment: string
+  comment: string,
+  orderNumber?: string
 ): Promise<Order | null> {
-  return rateOrderByToken(env, restaurantId, orderToken, rating, comment);
+  return rateOrderByToken(env, restaurantId, orderToken, rating, comment, orderNumber);
 }
 
 export async function listInventoryMovements(

@@ -672,7 +672,7 @@ export function CustomerPage({
       )}
 
       {toastText && (
-        <div className="fixed bottom-5 left-5 z-50 bg-[#104B34] text-white px-5 py-3 rounded-2xl shadow-lg text-xs font-extrabold border border-[#C5A46D]/40">
+        <div className="fixed bottom-24 lg:bottom-5 left-4 right-4 sm:right-auto sm:left-5 z-50 bg-[#104B34] text-white px-5 py-3 rounded-2xl shadow-lg text-xs font-extrabold border border-[#C5A46D]/40 text-center sm:text-right">
           {toastText}
         </div>
       )}

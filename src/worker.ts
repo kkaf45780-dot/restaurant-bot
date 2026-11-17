@@ -434,17 +434,47 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
   const rateMatch = pathname.match(/^\/api\/orders\/([^/]+)\/rate$/);
   if (method === 'POST' && rateMatch) {
     try {
+      const ipHash = await hashIpForLog(clientIp);
+      const rl = await checkSlidingRateLimit(`rate:${ipHash}`, 20, 60, kv);
+      if (!rl.allowed) {
+        return Response.json(
+          { error: 'تم إرسال طلبات كثيرة، يُرجى الانتظار دقيقة.' },
+          {
+            status: 429,
+            headers: { 'Retry-After': String(rl.retryAfterSeconds) },
+          }
+        );
+      }
+
       const orderNumber = decodeURIComponent(rateMatch[1]);
       const body = await readJsonBody<{
         restaurantId?: string;
         rating?: number;
         comment?: string;
+        token?: string;
       }>(request);
-      const { restaurantId = DEFAULT_RESTAURANT_ID, rating, comment = '' } = body;
+      const { restaurantId = DEFAULT_RESTAURANT_ID, rating, comment = '', token = '' } = body;
       const bundle = await findRestaurantBundle(env, String(restaurantId || DEFAULT_RESTAURANT_ID));
       if (!bundle) {
         return Response.json({ error: 'المطعم غير موجود' }, { status: 404 });
       }
+
+      const cleanToken = String(token || '').trim();
+      if (!cleanToken) {
+        return Response.json(
+          { error: 'رمز التتبع السري (orderToken) مطلوب لتقييم الطلب.' },
+          { status: 400 }
+        );
+      }
+
+      const validToken = await verifyOrderToken(secret, cleanToken, bundle.restaurant.id, orderNumber);
+      if (!validToken) {
+        return Response.json(
+          { error: 'رمز التتبع غير صالح لتقييم هذا الطلب.' },
+          { status: 403 }
+        );
+      }
+
       const numRating = Math.trunc(Number(rating));
       if (!Number.isFinite(numRating) || numRating < 1 || numRating > 5) {
         return Response.json({ error: 'يُرجى اختيار تقييم من 1 إلى 5 نجوم.' }, { status: 400 });
@@ -452,9 +482,10 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       const updated = await rateOrder(
         env,
         bundle.restaurant.id,
-        orderNumber,
+        cleanToken,
         numRating,
-        String(comment || '')
+        String(comment || ''),
+        orderNumber
       );
       if (!updated) {
         return Response.json({ error: 'لم يتم العثور على الطلب.' }, { status: 404 });

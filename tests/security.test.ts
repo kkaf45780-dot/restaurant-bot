@@ -218,11 +218,20 @@ describe('Security Hardening Suite', () => {
     const captchaBody = (await captchaPromptRes.json()) as { captchaRequired?: boolean };
     expect(captchaBody.captchaRequired).toBe(true);
 
-    // 7th..20th requests WITH valid human token -> 200
-    for (let i = 7; i <= 20; i++) {
+    // Forged human_verified_* bypass token must be rejected -> 403
+    const forgedBypassRes = await handlePublicChat({
+      ip,
+      captchaToken: `human_verified_${Date.now()}`,
+      message: 'تجاوز التحقق',
+      loadBundle: async () => TEST_BUNDLE,
+    });
+    expect(forgedBypassRes.status).toBe(403);
+
+    // 8th..20th requests WITH valid opaque challenge token -> 200 (since #6 was missing & #7 was forged)
+    for (let i = 8; i <= 20; i++) {
       const okRes = await handlePublicChat({
         ip,
-        captchaToken: `human_verified_${Date.now()}`,
+        captchaToken: `cf_turnstile_valid_token_${i}_abcdefghij`,
         message: 'إيه مواعيد العمل؟',
         loadBundle: async () => TEST_BUNDLE,
       });
@@ -232,7 +241,7 @@ describe('Security Hardening Suite', () => {
     // 21st request -> 429 rate limited
     const throttledRes = await handlePublicChat({
       ip,
-      captchaToken: `human_verified_${Date.now()}`,
+      captchaToken: 'cf_turnstile_valid_token_21_abcdefghij',
       message: 'طلب زيادة',
       loadBundle: async () => TEST_BUNDLE,
     });

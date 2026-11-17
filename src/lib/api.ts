@@ -124,12 +124,13 @@ export async function submitOrderRating(
   restaurantId: string,
   orderNumber: string,
   rating: number,
-  comment: string
+  comment: string,
+  token?: string
 ): Promise<{ order: Order }> {
   const res = await fetch(`/api/orders/${encodeURIComponent(orderNumber)}/rate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ restaurantId, rating, comment }),
+    body: JSON.stringify({ restaurantId, rating, comment, token }),
   });
   return parseJsonOrThrow(res);
 }

@@ -140,7 +140,8 @@ export function OrderTrackingView({
         restaurant.id,
         order.orderNumber,
         selectedStars,
-        ratingComment
+        ratingComment,
+        activeToken
       );
       setOrder(res.order);
     } catch (err) {

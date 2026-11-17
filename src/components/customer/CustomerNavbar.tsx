@@ -85,7 +85,7 @@ export function CustomerNavbar({
         <button
           type="button"
           onClick={() => handleNavClick('home')}
-          className="flex items-center gap-3 min-w-0 text-right cursor-pointer group shrink-0"
+          className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 sm:flex-initial text-right cursor-pointer group"
         >
           <div className="w-11 h-11 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] border border-[#176B45]/15 dark:border-[#2A3F35] overflow-hidden shrink-0 flex items-center justify-center">
             {logoSrc && !logoBroken ? (
@@ -169,7 +169,7 @@ export function CustomerNavbar({
             onClick={onOpenShareQr}
             title="مشاركة المنيو ورمز QR"
             aria-label="مشاركة المنيو ورمز QR"
-            className="w-10 h-10 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] border border-[#176B45]/15 dark:border-[#2A3F35] hover:bg-[#EFE9DC] flex items-center justify-center cursor-pointer"
+            className="hidden sm:flex w-10 h-10 rounded-xl bg-[#F7F3E9] dark:bg-[#192822] text-[#104B34] dark:text-[#ECF3EF] border border-[#176B45]/15 dark:border-[#2A3F35] hover:bg-[#EFE9DC] items-center justify-center cursor-pointer"
           >
             <QrCode className="w-4 h-4" />
           </button>
@@ -299,6 +299,18 @@ export function CustomerNavbar({
               <span>تثبيت التطبيق على جهازك</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setMobileMenuOpen(false);
+              onOpenShareQr();
+            }}
+            className="w-full min-h-[42px] rounded-xl bg-[#F7F3E9] dark:bg-[#0E1713] border border-[#176B45]/15 dark:border-[#2A3F35] text-[#104B34] dark:text-[#ECF3EF] text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <QrCode className="w-4 h-4" />
+            <span>مشاركة المنيو ورمز QR</span>
+          </button>
 
           <button
             type="button"

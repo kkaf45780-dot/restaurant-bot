@@ -283,9 +283,11 @@ export async function verifyTurnstileOrCaptcha(params: {
     }
   }
 
-  // Fallback human-challenge verification when Turnstile secret is not configured in local dev:
-  // Accepts human_verified_<timestamp> or turnstile-compatible token >= 12 chars
-  return /^human_verified_\d{10,}$/.test(token) || token.length >= 20;
+  // Reject legacy forged bypass tokens unconditionally
+  if (/^human_verified_/i.test(token) || token === 'verified' || token === 'bypass') {
+    return false;
+  }
+  return token.length >= 24;
 }
 
 export async function checkChatRateAndCaptcha(params: {
