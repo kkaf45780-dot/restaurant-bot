@@ -419,9 +419,9 @@ export function MenuManager({
                 {itemSizes.map((sz) => (
                   <div
                     key={sz.id}
-                    className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F7F3E9]/70 text-xs text-[#18221D]"
+                    className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#F7F3E9]/70 text-xs text-[#18221D]"
                   >
-                    <label className="flex items-center gap-2 font-bold cursor-pointer">
+                    <label className="flex items-center gap-2 font-bold cursor-pointer min-w-0">
                       <input
                         type="radio"
                         checked={Boolean(sz.isDefault)}
@@ -430,10 +430,10 @@ export function MenuManager({
                             prev.map((s) => ({ ...s, isDefault: s.id === sz.id }))
                           )
                         }
-                        className="accent-[#176B45]"
+                        className="accent-[#176B45] shrink-0"
                       />
-                      <span>{sz.label}</span>
-                      <span className="text-[#176B45] tabular-nums">
+                      <span className="truncate">{sz.label}</span>
+                      <span className="text-[#176B45] tabular-nums shrink-0">
                         ({sz.priceDelta >= 0 ? `+${sz.priceDelta}` : sz.priceDelta} {currency})
                       </span>
                     </label>
@@ -442,20 +442,20 @@ export function MenuManager({
                       onClick={() =>
                         setItemSizes((prev) => prev.filter((s) => s.id !== sz.id))
                       }
-                      className="text-red-600 hover:text-red-800 cursor-pointer"
+                      className="text-red-600 hover:text-red-800 cursor-pointer shrink-0"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 ))}
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2 items-center">
                 <input
                   type="text"
                   value={newSizeLabel}
                   onChange={(e) => setNewSizeLabel(e.target.value)}
                   placeholder="اسم الحجم (مثال: كيلو كامل)"
-                  className="flex-1 h-9 px-2.5 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] placeholder:text-[#7A8880]"
+                  className="flex-1 min-w-[130px] h-9 px-2.5 rounded-lg bg-[#F7F3E9] border border-[#176B45]/15 text-xs text-[#18221D] placeholder:text-[#7A8880]"
                 />
                 <input
                   type="number"
@@ -467,7 +467,7 @@ export function MenuManager({
                 <button
                   type="button"
                   onClick={addSizeOption}
-                  className="h-9 px-3 rounded-lg bg-[#176B45] text-white text-xs font-bold cursor-pointer"
+                  className="h-9 px-3 rounded-lg bg-[#176B45] text-white text-xs font-bold cursor-pointer shrink-0"
                 >
                   + إضافة
                 </button>

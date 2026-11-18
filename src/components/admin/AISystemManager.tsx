@@ -307,6 +307,7 @@ interface SystemSettingsSectionProps {
   configStatus: ServiceConfigStatus;
   onSave: (patch: Partial<Restaurant>) => Promise<void>;
   onNotify: (type: 'success' | 'error', text: string) => void;
+  onTokenRotated?: (newToken: string) => void;
 }
 
 export function SystemSettingsSection({
@@ -315,6 +316,7 @@ export function SystemSettingsSection({
   configStatus,
   onSave,
   onNotify,
+  onTokenRotated,
 }: SystemSettingsSectionProps) {
   const [sys, setSys] = useState<SystemSettings>(restaurant.systemSettings);
   const [saving, setSaving] = useState(false);
@@ -336,23 +338,25 @@ export function SystemSettingsSection({
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
     if (
-      newPassword.length < 10 ||
+      newPassword.length < 8 ||
       !/[A-Z]/.test(newPassword) ||
-      !/[a-z]/.test(newPassword) ||
       !/\d/.test(newPassword)
     ) {
       onNotify(
         'error',
-        'كلمة المرور الجديدة يجب أن تكون 10 أحرف على الأقل وتحتوي على حرف كبير وحرف صغير ورقم.'
+        'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم.'
       );
       return;
     }
     setChangingPass(true);
     try {
-      await adminUpdatePassword(token, currentPassword, newPassword);
+      const res = await adminUpdatePassword(token, currentPassword, newPassword);
+      if (res.token && onTokenRotated) {
+        onTokenRotated(res.token);
+      }
       setCurrentPassword('');
       setNewPassword('');
-      onNotify('success', 'تم تحديث كلمة مرور المدير بنجاح.');
+      onNotify('success', 'تم تحديث كلمة المرور بنجاح.');
     } catch (err) {
       onNotify(
         'error',
@@ -491,13 +495,13 @@ export function SystemSettingsSection({
         </div>
       </div>
 
-      {/* Password Security (Local Mode) */}
-      {configStatus.authMode === 'local' && (
+      {/* Password Security (Local / Employee Tokens) */}
+      {(configStatus.authMode === 'local' || token.startsWith('local.')) && (
         <form
           onSubmit={handlePasswordChange}
           className="bg-white rounded-2xl border border-[#1B4D3E]/10 p-5 space-y-4"
         >
-          <h3 className="text-base font-bold text-[#18221D]">تغيير كلمة مرور المدير</h3>
+          <h3 className="text-base font-bold text-[#18221D]">تغيير كلمة المرور</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <input
               type="password"
@@ -512,10 +516,10 @@ export function SystemSettingsSection({
               type="password"
               dir="ltr"
               required
-              minLength={10}
+              minLength={8}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="كلمة المرور الجديدة (10 أحرف، كبير وصغير ورقم)"
+              placeholder="كلمة المرور الجديدة (8 أحرف، حرف كبير ورقم)"
               className="h-11 px-3 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/10 text-sm text-[#18221D] placeholder:text-[#7A8880] text-left"
             />
           </div>

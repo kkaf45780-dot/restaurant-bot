@@ -30,6 +30,9 @@ import type { AdminTabPermission } from './permissions.ts';
 import type { CalculatedOrderResult } from './pricing.ts';
 
 const ADMIN_TOKEN_KEY = 'moazzaf_admin_token';
+const DEFAULT_TIMEOUT_MS = 12_000;
+const AUTH_TIMEOUT_MS = 10_000;
+const LONG_TIMEOUT_MS = 30_000;
 
 export function getStoredAdminToken(): string | null {
   try {
@@ -51,37 +54,72 @@ export function setStoredAdminToken(token: string | null): void {
 export class ApiError extends Error {
   status: number;
   captchaRequired?: boolean;
-  constructor(message: string, status: number, captchaRequired?: boolean) {
+  mustChangePassword?: boolean;
+  constructor(
+    message: string,
+    status: number,
+    captchaRequired?: boolean,
+    mustChangePassword?: boolean
+  ) {
     super(message);
     this.status = status;
     this.captchaRequired = captchaRequired;
+    this.mustChangePassword = mustChangePassword;
   }
 }
 
 async function fetchWithRetry(
   input: RequestInfo | URL,
   init?: RequestInit,
-  options?: { retry?: boolean; maxRetries?: number }
+  options?: { retry?: boolean; maxRetries?: number; timeoutMs?: number }
 ): Promise<Response> {
   const method = (init?.method || 'GET').toUpperCase();
   const canRetry = options?.retry ?? method === 'GET';
   const maxRetries = canRetry ? (options?.maxRetries ?? 2) : 0;
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const delays = [350, 850];
 
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    const upstreamSignal = init?.signal;
+    const onUpstreamAbort = () => controller.abort();
+    if (upstreamSignal) {
+      if (upstreamSignal.aborted) {
+        globalThis.clearTimeout(timer);
+        throw new ApiError('تم إلغاء الطلب.', 0);
+      }
+      upstreamSignal.addEventListener('abort', onUpstreamAbort, { once: true });
+    }
+
     try {
-      const res = await fetch(input, init);
-      if (canRetry && (res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxRetries) {
+      const res = await fetch(input, { ...init, signal: controller.signal });
+      if (res.status >= 400 && res.status < 500) {
+        return res;
+      }
+      if (
+        canRetry &&
+        (res.status === 502 || res.status === 503 || res.status === 504) &&
+        attempt < maxRetries
+      ) {
         await new Promise((r) => setTimeout(r, delays[attempt] ?? 850));
         continue;
       }
       return res;
     } catch (err) {
       lastError = err;
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new ApiError('انتهت مهلة الاتصال بالخادم. حاول مرة أخرى.', 0);
+      }
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, delays[attempt] ?? 850));
         continue;
+      }
+    } finally {
+      globalThis.clearTimeout(timer);
+      if (upstreamSignal) {
+        upstreamSignal.removeEventListener('abort', onUpstreamAbort);
       }
     }
   }
@@ -93,12 +131,14 @@ async function parseJsonOrThrow<T>(res: Response): Promise<T> {
   const data = (await res.json().catch(() => ({}))) as {
     error?: string;
     captchaRequired?: boolean;
+    mustChangePassword?: boolean;
   };
   if (!res.ok) {
     throw new ApiError(
       data.error || 'حدث خطأ أثناء الاتصال بالخادم.',
       res.status,
-      Boolean(data.captchaRequired)
+      Boolean(data.captchaRequired),
+      Boolean(data.mustChangePassword)
     );
   }
   return data as T;
@@ -130,11 +170,15 @@ export async function validateCouponCode(payload: {
   discountAmount: number;
   totals: CalculatedOrderResult;
 }> {
-  const res = await fetchWithRetry('/api/coupons/validate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const res = await fetchWithRetry(
+    '/api/coupons/validate',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -159,11 +203,15 @@ export async function submitOrderRating(
   comment: string,
   token?: string
 ): Promise<{ order: Order }> {
-  const res = await fetchWithRetry(`/api/orders/${encodeURIComponent(orderNumber)}/rate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ restaurantId, rating, comment, token }),
-  });
+  const res = await fetchWithRetry(
+    `/api/orders/${encodeURIComponent(orderNumber)}/rate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ restaurantId, rating, comment, token }),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -192,11 +240,15 @@ export async function sendChatMessage(payload: {
   diff: OrderDraftDiff;
   usedFallback: boolean;
 }> {
-  const res = await fetchWithRetry('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const res = await fetchWithRetry(
+    '/api/chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+    { retry: false, timeoutMs: LONG_TIMEOUT_MS }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -225,7 +277,7 @@ export async function submitOrder(payload: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     },
-    { retry: Boolean(payload.idempotencyKey) }
+    { retry: Boolean(payload.idempotencyKey), timeoutMs: DEFAULT_TIMEOUT_MS }
   );
   return parseJsonOrThrow(res);
 }
@@ -243,18 +295,25 @@ function adminHeaders(token: string): Record<string, string> {
 
 export async function adminLoginLocal(
   email: string,
-  password: string
+  password: string,
+  restaurantId?: string
 ): Promise<{
   token: string;
   email: string;
   role?: EmployeeRole;
+  restaurantId?: string;
+  mustChangePassword?: boolean;
   permissions?: AdminTabPermission[];
 }> {
-  const res = await fetch('/api/admin/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/login',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, ...(restaurantId ? { restaurantId } : {}) }),
+    },
+    { retry: false, timeoutMs: AUTH_TIMEOUT_MS }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -262,11 +321,17 @@ export async function fetchAdminMe(token: string): Promise<{
   authenticated: boolean;
   email: string;
   role?: EmployeeRole;
+  restaurantId?: string;
+  mustChangePassword?: boolean;
   permissions?: AdminTabPermission[];
 }> {
-  const res = await fetchWithRetry('/api/admin/me', {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/me',
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    { retry: true, timeoutMs: AUTH_TIMEOUT_MS }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -298,11 +363,15 @@ export async function adminUpdateRestaurant(
   restaurantId: string,
   patch: Partial<Restaurant>
 ): Promise<{ restaurant: Restaurant; hoursStatus: RestaurantHoursStatus }> {
-  const res = await fetch('/api/admin/restaurant', {
-    method: 'PUT',
-    headers: adminHeaders(token),
-    body: JSON.stringify({ restaurantId, ...patch }),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/restaurant',
+    {
+      method: 'PUT',
+      headers: adminHeaders(token),
+      body: JSON.stringify({ restaurantId, ...patch }),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -310,11 +379,15 @@ export async function adminUpsertCategory(
   token: string,
   category: Partial<MenuCategory> & { restaurantId: string; name: string }
 ): Promise<{ category: MenuCategory }> {
-  const res = await fetch('/api/admin/categories', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(category),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/categories',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(category),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -323,9 +396,10 @@ export async function adminDeleteCategory(
   restaurantId: string,
   categoryId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/categories/${encodeURIComponent(categoryId)}?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { method: 'DELETE', headers: adminHeaders(token) }
+    { method: 'DELETE', headers: adminHeaders(token) },
+    { retry: false }
   );
   await parseJsonOrThrow(res);
 }
@@ -334,11 +408,15 @@ export async function adminUpsertMenuItem(
   token: string,
   item: Partial<MenuItem> & { restaurantId: string; categoryId: string; name: string; price: number }
 ): Promise<{ item: MenuItem }> {
-  const res = await fetch('/api/admin/items', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(item),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/items',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(item),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -347,11 +425,15 @@ export async function adminReorderItems(
   restaurantId: string,
   orderedIds: string[]
 ): Promise<void> {
-  const res = await fetch('/api/admin/items/reorder', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify({ restaurantId, orderedIds }),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/items/reorder',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify({ restaurantId, orderedIds }),
+    },
+    { retry: false }
+  );
   await parseJsonOrThrow(res);
 }
 
@@ -360,9 +442,10 @@ export async function adminDeleteMenuItem(
   restaurantId: string,
   itemId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/items/${encodeURIComponent(itemId)}?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { method: 'DELETE', headers: adminHeaders(token) }
+    { method: 'DELETE', headers: adminHeaders(token) },
+    { retry: false }
   );
   await parseJsonOrThrow(res);
 }
@@ -371,11 +454,15 @@ export async function adminAdjustStock(
   token: string,
   payload: { restaurantId: string; itemId: string; delta: number; reason: string }
 ): Promise<{ item: MenuItem }> {
-  const res = await fetch('/api/admin/inventory/adjust', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(payload),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/inventory/adjust',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(payload),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -383,11 +470,15 @@ export async function adminUpsertDeliveryZone(
   token: string,
   zone: Partial<DeliveryZone> & { restaurantId: string; name: string; fee: number }
 ): Promise<{ zone: DeliveryZone }> {
-  const res = await fetch('/api/admin/delivery-zones', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(zone),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/delivery-zones',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(zone),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -396,9 +487,10 @@ export async function adminDeleteDeliveryZone(
   restaurantId: string,
   zoneId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/delivery-zones/${encodeURIComponent(zoneId)}?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { method: 'DELETE', headers: adminHeaders(token) }
+    { method: 'DELETE', headers: adminHeaders(token) },
+    { retry: false }
   );
   await parseJsonOrThrow(res);
 }
@@ -407,11 +499,15 @@ export async function adminUpsertBranch(
   token: string,
   branch: Partial<RestaurantBranch> & { restaurantId: string; name: string }
 ): Promise<{ branch: RestaurantBranch }> {
-  const res = await fetch('/api/admin/branches', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(branch),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/branches',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(branch),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -420,9 +516,10 @@ export async function adminDeleteBranch(
   restaurantId: string,
   branchId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/branches/${encodeURIComponent(branchId)}?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { method: 'DELETE', headers: adminHeaders(token) }
+    { method: 'DELETE', headers: adminHeaders(token) },
+    { retry: false }
   );
   await parseJsonOrThrow(res);
 }
@@ -431,11 +528,15 @@ export async function adminUpsertCoupon(
   token: string,
   coupon: Partial<Coupon> & { restaurantId: string; code: string; discountValue: number }
 ): Promise<{ coupon: Coupon }> {
-  const res = await fetch('/api/admin/coupons', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(coupon),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/coupons',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(coupon),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -444,22 +545,32 @@ export async function adminDeleteCoupon(
   restaurantId: string,
   couponId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/coupons/${encodeURIComponent(couponId)}?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { method: 'DELETE', headers: adminHeaders(token) }
+    { method: 'DELETE', headers: adminHeaders(token) },
+    { retry: false }
   );
   await parseJsonOrThrow(res);
 }
 
 export async function adminUpsertEmployee(
   token: string,
-  employee: Partial<Employee> & { restaurantId: string; name: string; email: string }
+  employee: Partial<Employee> & {
+    restaurantId: string;
+    name: string;
+    email: string;
+    password?: string;
+  }
 ): Promise<{ employee: Employee }> {
-  const res = await fetch('/api/admin/employees', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify(employee),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/employees',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify(employee),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -468,9 +579,10 @@ export async function adminDeleteEmployee(
   restaurantId: string,
   employeeId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/employees/${encodeURIComponent(employeeId)}?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { method: 'DELETE', headers: adminHeaders(token) }
+    { method: 'DELETE', headers: adminHeaders(token) },
+    { retry: false }
   );
   await parseJsonOrThrow(res);
 }
@@ -479,11 +591,15 @@ export async function adminMarkNotificationsRead(
   token: string,
   restaurantId: string
 ): Promise<void> {
-  const res = await fetch('/api/admin/notifications/read', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify({ restaurantId }),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/notifications/read',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify({ restaurantId }),
+    },
+    { retry: false }
+  );
   await parseJsonOrThrow(res);
 }
 
@@ -493,11 +609,33 @@ export async function adminUpdateOrderStatus(
   orderId: string,
   status: OrderStatus
 ): Promise<{ order: Order }> {
-  const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/status`, {
-    method: 'PATCH',
-    headers: adminHeaders(token),
-    body: JSON.stringify({ restaurantId, status }),
-  });
+  const res = await fetchWithRetry(
+    `/api/admin/orders/${encodeURIComponent(orderId)}/status`,
+    {
+      method: 'PATCH',
+      headers: adminHeaders(token),
+      body: JSON.stringify({ restaurantId, status }),
+    },
+    { retry: false }
+  );
+  return parseJsonOrThrow(res);
+}
+
+export async function adminUpdateOrderPaymentStatus(
+  token: string,
+  restaurantId: string,
+  orderId: string,
+  paymentStatus: 'pending' | 'paid'
+): Promise<{ order: Order }> {
+  const res = await fetchWithRetry(
+    `/api/admin/orders/${encodeURIComponent(orderId)}/payment`,
+    {
+      method: 'PATCH',
+      headers: adminHeaders(token),
+      body: JSON.stringify({ restaurantId, paymentStatus }),
+    },
+    { retry: false }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -505,9 +643,10 @@ export async function adminDownloadOrdersCsv(
   token: string,
   restaurantId: string
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/admin/orders/export?restaurantId=${encodeURIComponent(restaurantId)}`,
-    { headers: { Authorization: `Bearer ${token}` } }
+    { headers: { Authorization: `Bearer ${token}` } },
+    { retry: true, timeoutMs: LONG_TIMEOUT_MS }
   );
   if (!res.ok) throw new Error('تعذر تصدير تقرير الطلبات.');
   const blob = await res.blob();
@@ -525,13 +664,25 @@ export async function adminUpdatePassword(
   token: string,
   currentPassword: string,
   newPassword: string
-): Promise<void> {
-  const res = await fetch('/api/admin/password', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify({ currentPassword, newPassword }),
-  });
-  await parseJsonOrThrow(res);
+): Promise<{ ok: boolean; token?: string; mustChangePassword?: boolean }> {
+  const res = await fetchWithRetry(
+    '/api/admin/password',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify({ currentPassword, newPassword }),
+    },
+    { retry: false, timeoutMs: AUTH_TIMEOUT_MS }
+  );
+  const data = await parseJsonOrThrow<{
+    ok: boolean;
+    token?: string;
+    mustChangePassword?: boolean;
+  }>(res);
+  if (data.token) {
+    setStoredAdminToken(data.token);
+  }
+  return data;
 }
 
 export async function adminUploadImage(
@@ -545,14 +696,18 @@ export async function adminUploadImage(
     reader.readAsDataURL(file);
   });
 
-  const res = await fetch('/api/admin/upload', {
-    method: 'POST',
-    headers: adminHeaders(token),
-    body: JSON.stringify({
-      filename: file.name,
-      mimeType: file.type || 'image/jpeg',
-      dataBase64,
-    }),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/upload',
+    {
+      method: 'POST',
+      headers: adminHeaders(token),
+      body: JSON.stringify({
+        filename: file.name,
+        mimeType: file.type || 'image/jpeg',
+        dataBase64,
+      }),
+    },
+    { retry: false, timeoutMs: LONG_TIMEOUT_MS }
+  );
   return parseJsonOrThrow(res);
 }

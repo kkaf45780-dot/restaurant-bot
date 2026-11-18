@@ -595,7 +595,7 @@ interface EmployeesAndLogsSectionProps {
   employees: Employee[];
   activityLogs: ActivityLog[];
   onSaveEmployee: (
-    emp: Partial<Employee> & { name: string; email: string }
+    emp: Partial<Employee> & { name: string; email: string; password?: string }
   ) => Promise<void>;
   onDeleteEmployee: (employeeId: string) => Promise<void>;
 }
@@ -620,11 +620,22 @@ export function EmployeesAndLogsSection({
   onSaveEmployee,
   onDeleteEmployee,
 }: EmployeesAndLogsSectionProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<EmployeeRole>('cashier');
+  const [password, setPassword] = useState('');
   const [saving, setSaving] = useState(false);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setName('');
+    setEmail('');
+    setPhone('');
+    setRole('cashier');
+    setPassword('');
+  };
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -632,15 +643,15 @@ export function EmployeesAndLogsSection({
     setSaving(true);
     try {
       await onSaveEmployee({
+        ...(editingId ? { id: editingId } : {}),
         name: name.trim(),
         email: email.trim(),
         phone: phone.trim(),
         role,
         isActive: true,
+        ...(password.trim() ? { password: password.trim(), mustChangePassword: true } : {}),
       });
-      setName('');
-      setEmail('');
-      setPhone('');
+      resetForm();
     } finally {
       setSaving(false);
     }
@@ -651,66 +662,96 @@ export function EmployeesAndLogsSection({
       <div>
         <h2 className="text-2xl font-extrabold text-[#18221D]">الموظفون وسجل النشاط</h2>
         <p className="text-xs sm:text-sm text-[#5C6B63] mt-0.5">
-          إدارة فريق العمل وصلاحيات الوصول، ومراجعة سجل العمليات الإدارية.
+          إدارة فريق العمل وصلاحيات الوصول، تعيين كلمات المرور المؤقتة، ومراجعة سجل العمليات الإدارية.
         </p>
       </div>
 
       <form
         onSubmit={handleAdd}
-        className="bg-white rounded-2xl border border-[#176B45]/10 p-5 shadow-xs grid grid-cols-1 sm:grid-cols-5 gap-3 items-end"
+        className="bg-white rounded-2xl border border-[#176B45]/10 p-5 shadow-xs space-y-3"
       >
-        <div>
-          <label className="block text-xs font-bold text-[#5C6B63] mb-1">اسم الموظف</label>
-          <input
-            type="text"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D]"
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
+          <div>
+            <label className="block text-xs font-bold text-[#5C6B63] mb-1">اسم الموظف</label>
+            <input
+              type="text"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D]"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-[#5C6B63] mb-1">البريد الإلكتروني</label>
+            <input
+              type="email"
+              required
+              dir="ltr"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-[#5C6B63] mb-1">الهاتف</label>
+            <input
+              type="tel"
+              dir="ltr"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left tabular-nums"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-[#5C6B63] mb-1">الدور الوظيفي</label>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value as EmployeeRole)}
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold text-[#18221D]"
+            >
+              {(Object.keys(ROLE_LABELS_AR) as EmployeeRole[]).map((r) => (
+                <option key={r} value={r}>
+                  {ROLE_LABELS_AR[r]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-[#5C6B63] mb-1">
+              كلمة مرور مؤقتة {editingId ? '(اتركها فارغة للإبقاء)' : '(اختيارية)'}
+            </label>
+            <input
+              type="password"
+              dir="ltr"
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="TempPass#1"
+              className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left"
+            />
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex-1 h-10 px-3 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-xs font-extrabold cursor-pointer disabled:opacity-50"
+            >
+              {editingId ? 'حفظ التعديل' : '+ إضافة موظف'}
+            </button>
+            {editingId && (
+              <button
+                type="button"
+                onClick={resetForm}
+                className="h-10 px-3 rounded-xl bg-[#F7F3E9] text-xs font-bold text-[#18221D] cursor-pointer"
+              >
+                إلغاء
+              </button>
+            )}
+          </div>
         </div>
-        <div>
-          <label className="block text-xs font-bold text-[#5C6B63] mb-1">البريد الإلكتروني</label>
-          <input
-            type="email"
-            required
-            dir="ltr"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-bold text-[#5C6B63] mb-1">الهاتف</label>
-          <input
-            type="tel"
-            dir="ltr"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-sm text-[#18221D] text-left tabular-nums"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-bold text-[#5C6B63] mb-1">الدور الوظيفي</label>
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value as EmployeeRole)}
-            className="w-full h-10 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold text-[#18221D]"
-          >
-            {(Object.keys(ROLE_LABELS_AR) as EmployeeRole[]).map((r) => (
-              <option key={r} value={r}>
-                {ROLE_LABELS_AR[r]}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button
-          type="submit"
-          disabled={saving}
-          className="h-10 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-xs font-extrabold cursor-pointer"
-        >
-          + إضافة موظف
-        </button>
+        <p className="text-[11px] text-[#5C6B63]">
+          ملاحظة: عند تعيين كلمة مرور مؤقتة للموظف (8 أحرف على الأقل)، يُطلب منه تغييرها تلقائياً عند أول تسجيل دخول.
+        </p>
       </form>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -723,7 +764,7 @@ export function EmployeesAndLogsSection({
             {employees.map((emp) => {
               const perms = ROLE_PERMISSIONS[emp.role] ?? [];
               return (
-                <div key={emp.id} className="px-5 py-3.5 flex items-center justify-between gap-3">
+                <div key={emp.id} className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="font-extrabold text-sm text-[#18221D]">{emp.name}</p>
                     <p className="text-xs text-[#5C6B63]" dir="ltr">
@@ -739,7 +780,22 @@ export function EmployeesAndLogsSection({
                     </span>
                     <button
                       type="button"
+                      onClick={() => {
+                        setEditingId(emp.id);
+                        setName(emp.name);
+                        setEmail(emp.email);
+                        setPhone(emp.phone || '');
+                        setRole(emp.role);
+                        setPassword('');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-[#F7F3E9] hover:bg-[#EFE9DC] text-[#104B34] text-[11px] font-bold cursor-pointer"
+                    >
+                      تعديل / كلمة مرور
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => onDeleteEmployee(emp.id)}
+                      aria-label={`حذف ${emp.name}`}
                       className="w-8 h-8 rounded-lg hover:bg-red-50 text-red-600 flex items-center justify-center cursor-pointer"
                     >
                       <Trash2 className="w-4 h-4" />

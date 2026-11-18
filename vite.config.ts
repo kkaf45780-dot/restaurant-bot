@@ -108,6 +108,20 @@ export default defineConfig(() => {
         '@': path.resolve(import.meta.dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (!id.includes('node_modules')) return undefined;
+            if (id.includes('/react-dom/') || id.includes('/react/')) return 'vendor-react';
+            if (id.includes('/@supabase/')) return 'vendor-supabase';
+            if (id.includes('/lucide-react/')) return 'vendor-icons';
+            if (id.includes('/motion/') || id.includes('/framer-motion/')) return 'vendor-motion';
+            return undefined;
+          },
+        },
+      },
+    },
     server: {
       host: '0.0.0.0',
       port: 3000,

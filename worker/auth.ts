@@ -16,6 +16,7 @@ export interface AdminJwtPayload {
   sub: string;
   email: string;
   role: EmployeeRole;
+  restaurantId?: string;
   mustChangePassword: boolean;
   iat: number;
   exp: number;
@@ -64,10 +65,18 @@ export async function signAdminJwt(params: {
   secret: string;
   email: string;
   role: EmployeeRole;
+  restaurantId?: string;
   mustChangePassword: boolean;
   ttlSeconds?: number;
 }): Promise<string> {
-  const { secret, email, role, mustChangePassword, ttlSeconds = 60 * 60 * 12 } = params;
+  const {
+    secret,
+    email,
+    role,
+    restaurantId,
+    mustChangePassword,
+    ttlSeconds = 60 * 60 * 12,
+  } = params;
   if (!secret || secret.length < 16) {
     throw new Error('ADMIN_SESSION_SECRET must be configured with at least 16 characters.');
   }
@@ -79,6 +88,7 @@ export async function signAdminJwt(params: {
     sub: email.toLowerCase(),
     email: email.toLowerCase(),
     role,
+    ...(restaurantId ? { restaurantId } : {}),
     mustChangePassword,
     iat: nowSec,
     exp: nowSec + ttlSeconds,
@@ -143,6 +153,7 @@ export async function verifyAdminJwt(
       sub: String(payload.sub || payload.email),
       email: payload.email.toLowerCase(),
       role,
+      restaurantId: typeof payload.restaurantId === 'string' ? payload.restaurantId : undefined,
       mustChangePassword: Boolean(payload.mustChangePassword),
       iat: Number(payload.iat || 0),
       exp: payload.exp,
@@ -155,6 +166,32 @@ export async function verifyAdminJwt(
 
 export async function hashPasswordBcrypt(plain: string): Promise<string> {
   return bcrypt.hash(plain, 10);
+}
+
+export async function hashPasswordPbkdf2(plain: string): Promise<string> {
+  const saltBytes = new Uint8Array(12);
+  crypto.getRandomValues(saltBytes);
+  const salt = Array.from(saltBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(plain),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: enc.encode(salt),
+      iterations: 10000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+  const hex = Array.from(new Uint8Array(derived), (b) => b.toString(16).padStart(2, '0')).join('');
+  return `pbkdf2$${salt}$${hex}`;
 }
 
 export async function verifyPasswordAgainstHash(

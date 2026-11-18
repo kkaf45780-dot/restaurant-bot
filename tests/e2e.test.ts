@@ -610,6 +610,19 @@ async function runLiveE2ETests(): Promise<void> {
       assert.equal(hit429, true, 'Expected /api/chat rate limit 429 after 20 requests');
     });
 
+    await runTest('health endpoint returns live probe fields', async () => {
+      const hRes = await fetch(`${BASE_URL}/api/health`);
+      assert.equal(hRes.status, 200);
+      const hData = (await hRes.json()) as {
+        ok: boolean;
+        storageMode: string;
+        dbLatencyMs: number;
+      };
+      assert.equal(hData.ok, true);
+      assert.ok(hData.storageMode === 'local' || hData.storageMode === 'supabase');
+      assert.equal(typeof hData.dbLatencyMs, 'number');
+    });
+
     const ownerPassword = process.env.ADMIN_PASSWORD || 'Admin@1234';
     const ownerEmail = process.env.ADMIN_EMAIL || 'admin@hara-grill.eg';
 
@@ -635,32 +648,153 @@ async function runLiveE2ETests(): Promise<void> {
       });
       assert.equal(forceOpenRes.status, 200);
 
-      await runTest('rbac live: kitchen employee gets 403 on settings but 200 on overview', async () => {
-        const kitchenEmail = 'kitchen@hara-grill.eg';
-        const kLogin = await fetch(`${BASE_URL}/api/admin/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: kitchenEmail, password: ownerPassword }),
-        });
-        assert.equal(kLogin.status, 200);
-        const kData = (await kLogin.json()) as { token: string; role: string };
-        assert.equal(kData.role, 'kitchen');
+      await runTest(
+        'rbac & tenant & upload hardening: isolated employee credentials, mustChangePassword gate, cross-tenant 403, magic-byte upload',
+        async () => {
+          const kitchenEmail = 'kitchen@hara-grill.eg';
 
-        const forbiddenRes = await fetch(`${BASE_URL}/api/admin/restaurant`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${kData.token}`,
-          },
-          body: JSON.stringify({ name: 'محاولة غير مصرح بها' }),
-        });
-        assert.equal(forbiddenRes.status, 403);
+          // 1) Owner password must NOT unlock employee login
+          const ownerBypassAttempt = await fetch(`${BASE_URL}/api/admin/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: kitchenEmail, password: ownerPassword }),
+          });
+          assert.equal(ownerBypassAttempt.status, 401);
 
-        const allowedOverview = await fetch(`${BASE_URL}/api/admin/overview`, {
-          headers: { Authorization: `Bearer ${kData.token}` },
-        });
-        assert.equal(allowedOverview.status, 200);
-      });
+          // 2) Owner sets temporary password for kitchen employee
+          const tempKitchenPass = 'TempKitchen#2026';
+          const rotatedKitchenPass = 'KitchenStrong#2026';
+          const provisionRes = await fetch(`${BASE_URL}/api/admin/employees`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${ownerToken}`,
+            },
+            body: JSON.stringify({
+              id: 'emp_kitchen_1',
+              name: 'شيف الشواية',
+              email: kitchenEmail,
+              phone: '01033334444',
+              role: 'kitchen',
+              password: tempKitchenPass,
+              mustChangePassword: true,
+            }),
+          });
+          assert.equal(provisionRes.status, 200);
+
+          // 3) Kitchen logs in with temp password -> receives mustChangePassword: true
+          const kLogin = await fetch(`${BASE_URL}/api/admin/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: kitchenEmail, password: tempKitchenPass }),
+          });
+          assert.equal(kLogin.status, 200);
+          const kData = (await kLogin.json()) as {
+            token: string;
+            role: string;
+            mustChangePassword: boolean;
+          };
+          assert.equal(kData.role, 'kitchen');
+          assert.equal(kData.mustChangePassword, true);
+
+          // 4) Accessing overview before changing temporary password is blocked with 403
+          const blockedOverview = await fetch(`${BASE_URL}/api/admin/overview`, {
+            headers: { Authorization: `Bearer ${kData.token}` },
+          });
+          assert.equal(blockedOverview.status, 403);
+          const blockedBody = (await blockedOverview.json()) as { mustChangePassword?: boolean };
+          assert.equal(blockedBody.mustChangePassword, true);
+
+          // 5) Kitchen updates password -> receives clean token
+          const kPassChange = await fetch(`${BASE_URL}/api/admin/password`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${kData.token}`,
+            },
+            body: JSON.stringify({
+              currentPassword: tempKitchenPass,
+              newPassword: rotatedKitchenPass,
+            }),
+          });
+          assert.equal(kPassChange.status, 200);
+          const kRotated = (await kPassChange.json()) as {
+            ok: boolean;
+            token: string;
+            mustChangePassword: boolean;
+          };
+          assert.equal(kRotated.ok, true);
+          assert.equal(kRotated.mustChangePassword, false);
+          assert.ok(kRotated.token);
+
+          // 6) RBAC: kitchen gets 403 on settings & upload, 200 on own-tenant overview
+          const forbiddenRes = await fetch(`${BASE_URL}/api/admin/restaurant`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${kRotated.token}`,
+            },
+            body: JSON.stringify({ name: 'محاولة غير مصرح بها' }),
+          });
+          assert.equal(forbiddenRes.status, 403);
+
+          const forbiddenUpload = await fetch(`${BASE_URL}/api/admin/upload`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${kRotated.token}`,
+            },
+            body: JSON.stringify({
+              filename: 'x.png',
+              mimeType: 'image/png',
+              dataBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            }),
+          });
+          assert.equal(forbiddenUpload.status, 403);
+
+          const allowedOverview = await fetch(`${BASE_URL}/api/admin/overview`, {
+            headers: { Authorization: `Bearer ${kRotated.token}` },
+          });
+          assert.equal(allowedOverview.status, 200);
+
+          // 7) Cross-tenant isolation check
+          const crossTenantRes = await fetch(
+            `${BASE_URL}/api/admin/overview?restaurantId=unauthorized_tenant_xyz`,
+            { headers: { Authorization: `Bearer ${ownerToken}` } }
+          );
+          assert.equal(crossTenantRes.status, 403);
+
+          // 8) Upload magic-byte verification (rejects spoofed text/SVG claimed as image/png, accepts real PNG)
+          const fakeUploadRes = await fetch(`${BASE_URL}/api/admin/upload`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${ownerToken}`,
+            },
+            body: JSON.stringify({
+              filename: 'evil.png',
+              mimeType: 'image/png',
+              dataBase64: Buffer.from('<svg onload=alert(1)></svg>').toString('base64'),
+            }),
+          });
+          assert.equal(fakeUploadRes.status, 400);
+
+          const validPngUploadRes = await fetch(`${BASE_URL}/api/admin/upload`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${ownerToken}`,
+            },
+            body: JSON.stringify({
+              filename: 'pixel.png',
+              mimeType: 'image/png',
+              dataBase64:
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            }),
+          });
+          assert.equal(validPngUploadRes.status, 200);
+        }
+      );
 
       await runTest(
         'order lifecycle + IDOR token enforcement + stock deduction/restore + idempotency + rating + CSV export',
@@ -763,6 +897,22 @@ async function runLiveE2ETests(): Promise<void> {
             afterAcceptOverview.bundle.items.find((i) => i.id === 'item_kebab_kofta_mix')
               ?.stockQuantity ?? 0;
           assert.equal(stockAfterAccept, initialStock - 2);
+
+          // Mark payment as paid and verify toggle
+          const payRes = await fetch(
+            `${BASE_URL}/api/admin/orders/${created.order.id}/payment`,
+            {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${ownerToken}`,
+              },
+              body: JSON.stringify({ paymentStatus: 'paid' }),
+            }
+          );
+          assert.equal(payRes.status, 200);
+          const payData = (await payRes.json()) as { order: { paymentStatus: string } };
+          assert.equal(payData.order.paymentStatus, 'paid');
 
           // Mark delivered -> submit rating 5 stars
           const deliverRes = await fetch(

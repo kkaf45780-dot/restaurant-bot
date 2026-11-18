@@ -4,6 +4,7 @@ import {
   Bot,
   Check,
   ExternalLink,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   MapPin,
@@ -17,27 +18,9 @@ import {
   UtensilsCrossed,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { AdminLogin } from '../components/admin/AdminLogin.tsx';
-import {
-  AISettingsSection,
-  SystemSettingsSection,
-} from '../components/admin/AISystemManager.tsx';
-import {
-  AnalyticsSection,
-  CouponsSection,
-  EmployeesAndLogsSection,
-  InventorySection,
-} from '../components/admin/GrowthAndOpsManager.tsx';
-import { MenuManager } from '../components/admin/MenuManager.tsx';
-import {
-  DeliveryAndBranchesSection,
-  RestaurantSettingsSection,
-} from '../components/admin/OperationsManager.tsx';
-import {
-  OrdersSection,
-  OverviewSection,
-} from '../components/admin/OrdersAndOverview.tsx';
+import { SafeImage } from '../components/SafeImage.tsx';
 import {
   adminAdjustStock,
   adminDeleteBranch,
@@ -49,7 +32,9 @@ import {
   adminDownloadOrdersCsv,
   adminMarkNotificationsRead,
   adminReorderItems,
+  adminUpdateOrderPaymentStatus,
   adminUpdateOrderStatus,
+  adminUpdatePassword,
   adminUpdateRestaurant,
   adminUploadImage,
   adminUpsertBranch,
@@ -58,12 +43,12 @@ import {
   adminUpsertDeliveryZone,
   adminUpsertEmployee,
   adminUpsertMenuItem,
+  ApiError,
   fetchAdminMe,
   fetchAdminOverview,
   getStoredAdminToken,
   setStoredAdminToken,
 } from '../lib/api.ts';
-import { SafeImage } from '../components/SafeImage.tsx';
 import type { RestaurantHoursStatus } from '../lib/hours.ts';
 import { hasPermission, ROLE_LABELS_AR } from '../lib/permissions.ts';
 import { supabase } from '../lib/supabase.ts';
@@ -87,6 +72,60 @@ import type {
   ServiceConfigStatus,
 } from '../types/restaurant.ts';
 
+const OverviewSection = lazy(() =>
+  import('../components/admin/OrdersAndOverview.tsx').then((m) => ({
+    default: m.OverviewSection,
+  }))
+);
+const OrdersSection = lazy(() =>
+  import('../components/admin/OrdersAndOverview.tsx').then((m) => ({
+    default: m.OrdersSection,
+  }))
+);
+const MenuManager = lazy(() =>
+  import('../components/admin/MenuManager.tsx').then((m) => ({ default: m.MenuManager }))
+);
+const DeliveryAndBranchesSection = lazy(() =>
+  import('../components/admin/OperationsManager.tsx').then((m) => ({
+    default: m.DeliveryAndBranchesSection,
+  }))
+);
+const RestaurantSettingsSection = lazy(() =>
+  import('../components/admin/OperationsManager.tsx').then((m) => ({
+    default: m.RestaurantSettingsSection,
+  }))
+);
+const InventorySection = lazy(() =>
+  import('../components/admin/GrowthAndOpsManager.tsx').then((m) => ({
+    default: m.InventorySection,
+  }))
+);
+const CouponsSection = lazy(() =>
+  import('../components/admin/GrowthAndOpsManager.tsx').then((m) => ({
+    default: m.CouponsSection,
+  }))
+);
+const AnalyticsSection = lazy(() =>
+  import('../components/admin/GrowthAndOpsManager.tsx').then((m) => ({
+    default: m.AnalyticsSection,
+  }))
+);
+const EmployeesAndLogsSection = lazy(() =>
+  import('../components/admin/GrowthAndOpsManager.tsx').then((m) => ({
+    default: m.EmployeesAndLogsSection,
+  }))
+);
+const AISettingsSection = lazy(() =>
+  import('../components/admin/AISystemManager.tsx').then((m) => ({
+    default: m.AISettingsSection,
+  }))
+);
+const SystemSettingsSection = lazy(() =>
+  import('../components/admin/AISystemManager.tsx').then((m) => ({
+    default: m.SystemSettingsSection,
+  }))
+);
+
 type AdminTab =
   | 'overview'
   | 'orders'
@@ -109,6 +148,13 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [adminEmail, setAdminEmail] = useState('admin@hara-grill.eg');
   const [adminRole, setAdminRole] = useState<EmployeeRole>('owner');
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+
+  const [forcedCurrentPass, setForcedCurrentPass] = useState('');
+  const [forcedNewPass, setForcedNewPass] = useState('');
+  const [forcedConfirmPass, setForcedConfirmPass] = useState('');
+  const [forcedSaving, setForcedSaving] = useState(false);
+  const [forcedError, setForcedError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -152,6 +198,10 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         setConfigStatus(data.configStatus);
         document.title = `لوحة تحكم المدير — ${data.bundle.restaurant.name}`;
       } catch (err) {
+        if (err instanceof ApiError && err.mustChangePassword) {
+          setMustChangePassword(true);
+          return;
+        }
         const msg = err instanceof Error ? err.message : 'تعذر تحميل بيانات لوحة التحكم.';
         setOverviewError(msg);
         notify('error', msg);
@@ -171,11 +221,19 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
             if (me.email) setAdminEmail(me.email);
             if (me.role) setAdminRole(me.role);
             setToken(stored);
-            await loadOverview(stored);
+            if (me.mustChangePassword) {
+              setMustChangePassword(true);
+            } else {
+              setMustChangePassword(false);
+              await loadOverview(stored);
+            }
           }
         } catch {
           setStoredAdminToken(null);
-          if (mounted) setToken(null);
+          if (mounted) {
+            setToken(null);
+            setMustChangePassword(false);
+          }
         }
       }
       if (mounted) setCheckingAuth(false);
@@ -193,6 +251,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
       if (event === 'SIGNED_OUT') {
         setStoredAdminToken(null);
         setToken(null);
+        setMustChangePassword(false);
       } else if (
         (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') &&
         session?.access_token
@@ -208,7 +267,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
 
   useEffect(() => {
     const client = supabase;
-    if (!client || !token) return;
+    if (!client || !token || mustChangePassword) return;
     const restId = bundle?.restaurant.id;
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleReload = () => {
@@ -254,7 +313,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
       if (debounceTimer) clearTimeout(debounceTimer);
       void client.removeChannel(channel);
     };
-  }, [token, bundle?.restaurant.id, loadOverview]);
+  }, [token, mustChangePassword, bundle?.restaurant.id, loadOverview]);
 
   useEffect(() => {
     if (!hasPermission(adminRole, activeTab)) {
@@ -273,24 +332,75 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
     [orders]
   );
 
-  const handleLoginSuccess = async (newToken: string) => {
+  const handleLoginSuccess = async (
+    newToken: string,
+    email: string,
+    initialMustChange?: boolean
+  ) => {
     setStoredAdminToken(newToken);
     setToken(newToken);
+    setAdminEmail(email);
     try {
       const me = await fetchAdminMe(newToken);
       if (me.email) setAdminEmail(me.email);
       if (me.role) setAdminRole(me.role);
+      const mustChange = Boolean(me.mustChangePassword ?? initialMustChange);
+      setMustChangePassword(mustChange);
+      if (!mustChange) {
+        await loadOverview(newToken);
+      }
     } catch {
       setAdminRole('owner');
+      const mustChange = Boolean(initialMustChange);
+      setMustChangePassword(mustChange);
+      if (!mustChange) {
+        await loadOverview(newToken);
+      }
     }
-    await loadOverview(newToken);
   };
 
   const handleLogout = async () => {
     setStoredAdminToken(null);
     setToken(null);
+    setMustChangePassword(false);
+    setBundle(null);
     if (supabase) {
       await supabase.auth.signOut().catch(() => {});
+    }
+  };
+
+  const handleForcedPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setForcedError(null);
+    if (
+      forcedNewPass.length < 8 ||
+      !/[A-Z]/.test(forcedNewPass) ||
+      !/\d/.test(forcedNewPass)
+    ) {
+      setForcedError('كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم.');
+      return;
+    }
+    if (forcedNewPass !== forcedConfirmPass) {
+      setForcedError('كلمة المرور الجديدة وتأكيدها غير متطابقين.');
+      return;
+    }
+
+    setForcedSaving(true);
+    try {
+      const res = await adminUpdatePassword(token, forcedCurrentPass, forcedNewPass);
+      const activeTok = res.token || token;
+      setToken(activeTok);
+      setMustChangePassword(false);
+      setForcedCurrentPass('');
+      setForcedNewPass('');
+      setForcedConfirmPass('');
+      notify('success', 'تم تحديث كلمة المرور بنجاح.');
+      await loadOverview(activeTok);
+    } catch (err) {
+      setForcedError(err instanceof Error ? err.message : 'تعذر تحديث كلمة المرور.');
+    } finally {
+      setForcedSaving(false);
     }
   };
 
@@ -308,6 +418,101 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         onSuccess={handleLoginSuccess}
         onBackToStore={onNavigateCustomer}
       />
+    );
+  }
+
+  if (mustChangePassword) {
+    return (
+      <div className="min-h-screen bg-[#F8F5EE] text-[#18221D] flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl border border-[#1B4D3E]/15 p-6 sm:p-8 space-y-5 shadow-xs">
+          <div className="flex items-center justify-between">
+            <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center">
+              <KeyRound className="w-5 h-5" />
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              className="min-h-[38px] px-3 rounded-xl text-xs font-bold text-[#5C6B63] hover:bg-[#FAF7F0] flex items-center gap-1.5 cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>تسجيل الخروج</span>
+            </button>
+          </div>
+
+          <div>
+            <h1 className="text-xl font-extrabold text-[#18221D]">تغيير كلمة المرور المؤقتة مطلوب</h1>
+            <p className="text-xs sm:text-sm text-[#5C6B63] mt-1 leading-relaxed">
+              حسابك (<span dir="ltr" className="font-bold text-[#104B34]">{adminEmail}</span>) يستخدم كلمة مرور مؤقتة. يرجى تعيين كلمة مرور جديدة دائمة قبل الدخول إلى لوحة التحكم.
+            </p>
+          </div>
+
+          <form onSubmit={handleForcedPasswordSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-[#35443C] mb-1">
+                كلمة المرور المؤقتة الحالية
+              </label>
+              <input
+                type="password"
+                dir="ltr"
+                required
+                value={forcedCurrentPass}
+                onChange={(e) => setForcedCurrentPass(e.target.value)}
+                placeholder="••••••••"
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/15 text-sm text-[#18221D] text-left"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-[#35443C] mb-1">
+                كلمة المرور الجديدة (8 أحرف على الأقل، حرف كبير ورقم)
+              </label>
+              <input
+                type="password"
+                dir="ltr"
+                required
+                minLength={8}
+                value={forcedNewPass}
+                onChange={(e) => setForcedNewPass(e.target.value)}
+                placeholder="NewStrongPass1"
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/15 text-sm text-[#18221D] text-left"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-[#35443C] mb-1">
+                تأكيد كلمة المرور الجديدة
+              </label>
+              <input
+                type="password"
+                dir="ltr"
+                required
+                minLength={8}
+                value={forcedConfirmPass}
+                onChange={(e) => setForcedConfirmPass(e.target.value)}
+                placeholder="NewStrongPass1"
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F8F5EE] border border-[#1B4D3E]/15 text-sm text-[#18221D] text-left"
+              />
+            </div>
+
+            {forcedError && (
+              <div
+                role="alert"
+                className="rounded-xl bg-[#FEE2E2]/70 border border-[#B91C1C]/20 p-3 text-xs font-semibold text-[#991B1B]"
+              >
+                {forcedError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={forcedSaving}
+              className="w-full min-h-[46px] rounded-xl bg-[#104B34] hover:bg-[#176B45] disabled:opacity-50 text-white text-sm font-extrabold cursor-pointer"
+            >
+              {forcedSaving ? 'جاري التحديث...' : 'حفظ كلمة المرور ودخول لوحة التحكم'}
+            </button>
+          </form>
+        </div>
+      </div>
     );
   }
 
@@ -488,7 +693,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   };
 
   const handleSaveEmployee = async (
-    emp: Partial<Employee> & { name: string; email: string }
+    emp: Partial<Employee> & { name: string; email: string; password?: string }
   ) => {
     try {
       await adminUpsertEmployee(token, { ...emp, restaurantId: restId });
@@ -516,6 +721,22 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
       notify('success', 'تم تحديث حالة الطلب بنجاح.');
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'تعذر تحديث حالة الطلب.');
+    }
+  };
+
+  const handleUpdateOrderPaymentStatus = async (
+    orderId: string,
+    paymentStatus: 'pending' | 'paid'
+  ) => {
+    try {
+      await adminUpdateOrderPaymentStatus(token, restId, orderId, paymentStatus);
+      await loadOverview(token);
+      notify(
+        'success',
+        paymentStatus === 'paid' ? 'تم تسجيل الطلب كمدفوع.' : 'تم تغيير حالة الدفع إلى عند الاستلام.'
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'تعذر تحديث حالة الدفع.');
     }
   };
 
@@ -647,13 +868,13 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   return (
     <div className="min-h-screen bg-[#F3F4F2] text-[#18221D] flex">
       {/* Desktop Sidebar (#104B34) */}
-      <aside className="hidden lg:block w-64 bg-[#104B34] shrink-0 sticky top-0 h-screen">
+      <aside className="no-print hidden lg:block w-64 bg-[#104B34] shrink-0 sticky top-0 h-screen">
         {renderSidebarContent()}
       </aside>
 
       {/* Mobile Drawer */}
       {mobileMenuOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden flex">
+        <div className="no-print fixed inset-0 z-50 lg:hidden flex">
           <div className="w-72 max-w-[85vw] bg-[#104B34] h-full relative z-10">
             <button
               type="button"
@@ -671,8 +892,8 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
 
       {/* Main Content */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Greeting Header matching Restaurant_admin_dashboard_website */}
-        <header className="bg-white border-b border-[#176B45]/10 px-4 sm:px-6 py-3 flex items-center justify-between gap-4 sticky top-0 z-20">
+        {/* Top Greeting Header */}
+        <header className="no-print bg-white border-b border-[#176B45]/10 px-4 sm:px-6 py-3 flex items-center justify-between gap-4 sticky top-0 z-20">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
@@ -684,7 +905,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
             </button>
             <div className="min-w-0">
               <p className="text-sm sm:text-base font-extrabold text-[#18221D] truncate">
-                أهلاً بك، مدير مطعم {bundle.restaurant.name}
+                أهلاً بك، {ROLE_LABELS_AR[adminRole]} — {bundle.restaurant.name}
               </p>
               <div className="flex items-center gap-2 text-xs text-[#5C6B63]">
                 <span
@@ -694,26 +915,29 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
                 />
                 <span>{hoursStatus.statusLabel}</span>
                 {hoursStatus.reasonText && (
-                  <span className="hidden sm:inline text-[#5C6B63] font-semibold">· {hoursStatus.reasonText}</span>
+                  <span className="hidden sm:inline text-[#5C6B63] font-semibold">
+                    · {hoursStatus.reasonText}
+                  </span>
                 )}
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
-            {/* Quick Open/Closed Switch */}
-            <select
-              aria-label="تبديل حالة المطعم"
-              value={bundle.restaurant.manualStatus}
-              onChange={(e) =>
-                handleQuickStatusChange(e.target.value as ManualRestaurantStatus)
-              }
-              className="hidden sm:block h-9 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold text-[#104B34] cursor-pointer"
-            >
-              <option value="auto">وضع التشغيل: تلقائي</option>
-              <option value="force_open">مفتوح (تجاوز يدوي)</option>
-              <option value="force_closed">مغلق مؤقتاً</option>
-            </select>
+            {hasPermission(adminRole, 'settings') && (
+              <select
+                aria-label="تبديل حالة المطعم"
+                value={bundle.restaurant.manualStatus}
+                onChange={(e) =>
+                  handleQuickStatusChange(e.target.value as ManualRestaurantStatus)
+                }
+                className="hidden sm:block h-9 px-3 rounded-xl bg-[#F7F3E9] border border-[#176B45]/15 text-xs font-bold text-[#104B34] cursor-pointer"
+              >
+                <option value="auto">وضع التشغيل: تلقائي</option>
+                <option value="force_open">مفتوح (تجاوز يدوي)</option>
+                <option value="force_closed">مغلق مؤقتاً</option>
+              </select>
+            )}
 
             {/* Notifications Dropdown */}
             <div className="relative">
@@ -787,7 +1011,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         </header>
 
         {toast && (
-          <div className="px-4 sm:px-6 pt-4">
+          <div className="no-print px-4 sm:px-6 pt-4">
             <div
               className={`rounded-xl px-4 py-3 text-sm font-bold border ${
                 toast.type === 'success'
@@ -801,113 +1025,123 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         )}
 
         <main className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
-          {activeTab === 'overview' && (
-            <OverviewSection
-              restaurant={bundle.restaurant}
-              hoursStatus={hoursStatus}
-              items={bundle.items}
-              orders={orders}
-              onGoToOrders={() => setActiveTab('orders')}
-              onGoToInventory={() => setActiveTab('inventory')}
-            />
-          )}
+          <Suspense
+            fallback={
+              <div className="bg-white rounded-2xl border border-[#176B45]/10 p-10 text-center text-sm font-bold text-[#104B34]">
+                جاري تحميل القسم...
+              </div>
+            }
+          >
+            {activeTab === 'overview' && (
+              <OverviewSection
+                restaurant={bundle.restaurant}
+                hoursStatus={hoursStatus}
+                items={bundle.items}
+                orders={orders}
+                onGoToOrders={() => setActiveTab('orders')}
+                onGoToInventory={() => setActiveTab('inventory')}
+              />
+            )}
 
-          {activeTab === 'orders' && (
-            <OrdersSection
-              restaurant={bundle.restaurant}
-              orders={orders}
-              onUpdateStatus={handleUpdateOrderStatus}
-              onExportCsv={handleExportCsv}
-            />
-          )}
+            {activeTab === 'orders' && (
+              <OrdersSection
+                restaurant={bundle.restaurant}
+                orders={orders}
+                onUpdateStatus={handleUpdateOrderStatus}
+                onUpdatePaymentStatus={handleUpdateOrderPaymentStatus}
+                onExportCsv={handleExportCsv}
+              />
+            )}
 
-          {activeTab === 'menu' && (
-            <MenuManager
-              restaurant={bundle.restaurant}
-              categories={bundle.categories}
-              items={bundle.items}
-              onSaveCategory={handleSaveCategory}
-              onDeleteCategory={handleDeleteCategory}
-              onSaveItem={handleSaveItem}
-              onDeleteItem={handleDeleteItem}
-              onReorderItems={handleReorderItems}
-              onUploadImage={handleUploadImage}
-            />
-          )}
+            {activeTab === 'menu' && (
+              <MenuManager
+                restaurant={bundle.restaurant}
+                categories={bundle.categories}
+                items={bundle.items}
+                onSaveCategory={handleSaveCategory}
+                onDeleteCategory={handleDeleteCategory}
+                onSaveItem={handleSaveItem}
+                onDeleteItem={handleDeleteItem}
+                onReorderItems={handleReorderItems}
+                onUploadImage={handleUploadImage}
+              />
+            )}
 
-          {activeTab === 'delivery' && (
-            <DeliveryAndBranchesSection
-              restaurant={bundle.restaurant}
-              zones={bundle.deliveryZones}
-              branches={bundle.branches}
-              onSaveZone={handleSaveZone}
-              onDeleteZone={handleDeleteZone}
-              onSaveBranch={handleSaveBranch}
-              onDeleteBranch={handleDeleteBranch}
-            />
-          )}
+            {activeTab === 'delivery' && (
+              <DeliveryAndBranchesSection
+                restaurant={bundle.restaurant}
+                zones={bundle.deliveryZones}
+                branches={bundle.branches}
+                onSaveZone={handleSaveZone}
+                onDeleteZone={handleDeleteZone}
+                onSaveBranch={handleSaveBranch}
+                onDeleteBranch={handleDeleteBranch}
+              />
+            )}
 
-          {activeTab === 'inventory' && (
-            <InventorySection
-              items={bundle.items}
-              movements={inventoryMovements}
-              onAdjustStock={handleAdjustStock}
-            />
-          )}
+            {activeTab === 'inventory' && (
+              <InventorySection
+                items={bundle.items}
+                movements={inventoryMovements}
+                onAdjustStock={handleAdjustStock}
+              />
+            )}
 
-          {activeTab === 'coupons' && (
-            <CouponsSection
-              restaurant={bundle.restaurant}
-              coupons={coupons}
-              onSaveCoupon={handleSaveCoupon}
-              onDeleteCoupon={handleDeleteCoupon}
-            />
-          )}
+            {activeTab === 'coupons' && (
+              <CouponsSection
+                restaurant={bundle.restaurant}
+                coupons={coupons}
+                onSaveCoupon={handleSaveCoupon}
+                onDeleteCoupon={handleDeleteCoupon}
+              />
+            )}
 
-          {activeTab === 'analytics' && (
-            <AnalyticsSection
-              restaurant={bundle.restaurant}
-              items={bundle.items}
-              orders={orders}
-              onExportCsv={handleExportCsv}
-            />
-          )}
+            {activeTab === 'analytics' && (
+              <AnalyticsSection
+                restaurant={bundle.restaurant}
+                items={bundle.items}
+                orders={orders}
+                onExportCsv={handleExportCsv}
+              />
+            )}
 
-          {activeTab === 'employees' && (
-            <EmployeesAndLogsSection
-              employees={employees}
-              activityLogs={activityLogs}
-              onSaveEmployee={handleSaveEmployee}
-              onDeleteEmployee={handleDeleteEmployee}
-            />
-          )}
+            {activeTab === 'employees' && (
+              <EmployeesAndLogsSection
+                employees={employees}
+                activityLogs={activityLogs}
+                onSaveEmployee={handleSaveEmployee}
+                onDeleteEmployee={handleDeleteEmployee}
+              />
+            )}
 
-          {activeTab === 'settings' && (
-            <RestaurantSettingsSection
-              restaurant={bundle.restaurant}
-              onSave={handleSaveRestaurant}
-              onUploadImage={handleUploadImage}
-            />
-          )}
+            {activeTab === 'settings' && (
+              <RestaurantSettingsSection
+                restaurant={bundle.restaurant}
+                onSave={handleSaveRestaurant}
+                onUploadImage={handleUploadImage}
+              />
+            )}
 
-          {activeTab === 'ai' && (
-            <AISettingsSection
-              restaurant={bundle.restaurant}
-              aiLogs={aiLogs}
-              configStatus={configStatus}
-              onSave={handleSaveRestaurant}
-            />
-          )}
+            {activeTab === 'ai' && (
+              <AISettingsSection
+                restaurant={bundle.restaurant}
+                aiLogs={aiLogs}
+                configStatus={configStatus}
+                onSave={handleSaveRestaurant}
+              />
+            )}
 
-          {activeTab === 'system' && (
-            <SystemSettingsSection
-              token={token}
-              restaurant={bundle.restaurant}
-              configStatus={configStatus}
-              onSave={handleSaveRestaurant}
-              onNotify={notify}
-            />
-          )}
+            {activeTab === 'system' && (
+              <SystemSettingsSection
+                token={token}
+                restaurant={bundle.restaurant}
+                configStatus={configStatus}
+                onSave={handleSaveRestaurant}
+                onNotify={notify}
+                onTokenRotated={(nextTok) => setToken(nextTok)}
+              />
+            )}
+          </Suspense>
         </main>
       </div>
     </div>

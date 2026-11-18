@@ -1,20 +1,50 @@
 import { WifiOff } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AIChatView } from '../components/customer/AIChatView.tsx';
-import { AboutView, LegalPageView } from '../components/customer/AboutAndLegalViews.tsx';
-import { CheckoutView } from '../components/customer/CheckoutView.tsx';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CustomerNavbar,
   type CustomerRoute,
 } from '../components/customer/CustomerNavbar.tsx';
 import { HomepageView } from '../components/customer/HomepageView.tsx';
-import { MenuCatalogView } from '../components/customer/MenuCatalogView.tsx';
-import {
-  OrderHistoryAndFavoritesView,
-  OrderTrackingView,
-} from '../components/customer/OrderTrackingAndHistoryView.tsx';
-import { ProductDetailsModal } from '../components/customer/ProductDetailsModal.tsx';
-import { ShareMenuModal } from '../components/customer/ShareMenuModal.tsx';
+
+const AIChatView = lazy(() =>
+  import('../components/customer/AIChatView.tsx').then((m) => ({ default: m.AIChatView }))
+);
+const AboutView = lazy(() =>
+  import('../components/customer/AboutAndLegalViews.tsx').then((m) => ({ default: m.AboutView }))
+);
+const LegalPageView = lazy(() =>
+  import('../components/customer/AboutAndLegalViews.tsx').then((m) => ({
+    default: m.LegalPageView,
+  }))
+);
+const CheckoutView = lazy(() =>
+  import('../components/customer/CheckoutView.tsx').then((m) => ({ default: m.CheckoutView }))
+);
+const MenuCatalogView = lazy(() =>
+  import('../components/customer/MenuCatalogView.tsx').then((m) => ({
+    default: m.MenuCatalogView,
+  }))
+);
+const OrderTrackingView = lazy(() =>
+  import('../components/customer/OrderTrackingAndHistoryView.tsx').then((m) => ({
+    default: m.OrderTrackingView,
+  }))
+);
+const OrderHistoryAndFavoritesView = lazy(() =>
+  import('../components/customer/OrderTrackingAndHistoryView.tsx').then((m) => ({
+    default: m.OrderHistoryAndFavoritesView,
+  }))
+);
+const ProductDetailsModal = lazy(() =>
+  import('../components/customer/ProductDetailsModal.tsx').then((m) => ({
+    default: m.ProductDetailsModal,
+  }))
+);
+const ShareMenuModal = lazy(() =>
+  import('../components/customer/ShareMenuModal.tsx').then((m) => ({
+    default: m.ShareMenuModal,
+  }))
+);
 import {
   useDarkMode,
   useOnlineStatus,
@@ -789,137 +819,147 @@ export function CustomerPage({
           />
         )}
 
-        {route === 'about' && (
-          <AboutView
-            restaurant={restaurant}
-            hoursStatus={hoursStatus}
-            branches={branches}
-            deliveryZones={deliveryZones}
-            onOpenShareQr={() => setShareModalOpen(true)}
-            onGoMenu={() => onNavigateRoute('menu')}
-            onGoChat={() => onNavigateRoute('chat')}
-          />
-        )}
+        <Suspense
+          fallback={
+            route !== 'home' ? (
+              <div className="max-w-5xl mx-auto px-4 py-16 text-center text-sm font-bold text-[#104B34] dark:text-[#4ADE80]">
+                جاري تحميل الصفحة...
+              </div>
+            ) : null
+          }
+        >
+          {route === 'about' && (
+            <AboutView
+              restaurant={restaurant}
+              hoursStatus={hoursStatus}
+              branches={branches}
+              deliveryZones={deliveryZones}
+              onOpenShareQr={() => setShareModalOpen(true)}
+              onGoMenu={() => onNavigateRoute('menu')}
+              onGoChat={() => onNavigateRoute('chat')}
+            />
+          )}
 
-        {(route === 'privacy' || route === 'terms') && (
-          <LegalPageView
-            mode={route}
-            restaurant={restaurant}
-            onGoMenu={() => onNavigateRoute('menu')}
-          />
-        )}
+          {(route === 'privacy' || route === 'terms') && (
+            <LegalPageView
+              mode={route}
+              restaurant={restaurant}
+              onGoMenu={() => onNavigateRoute('menu')}
+            />
+          )}
 
-        {route === 'menu' && (
-          <MenuCatalogView
-            categories={categories}
-            items={items}
-            deliveryZones={deliveryZones}
-            activeCoupons={activeCoupons}
-            currencyLabel={restaurant.systemSettings.currencyLabel}
-            draft={orderDraft}
-            favoriteIds={favoriteIds}
-            initialCategoryId={menuInitialCat}
-            onToggleFavorite={handleToggleFavorite}
-            onSelectItemDetails={(it) => {
-              setEditingCartLine(null);
-              setSelectedProductModal(it);
-            }}
-            onQuickAddItem={handleQuickAddItem}
-            onUpdateLineQty={handleUpdateLineQty}
-            onEditCartLine={(item, line) => {
-              setEditingCartLine(line);
-              setSelectedProductModal(item);
-            }}
-            onClearCart={() => setOrderDraft((prev) => ({ ...prev, items: [] }))}
-            onGoCheckout={() => {
-              setConfirmedOrderState(null);
-              onNavigateRoute('checkout');
-            }}
-          />
-        )}
+          {route === 'menu' && (
+            <MenuCatalogView
+              categories={categories}
+              items={items}
+              deliveryZones={deliveryZones}
+              activeCoupons={activeCoupons}
+              currencyLabel={restaurant.systemSettings.currencyLabel}
+              draft={orderDraft}
+              favoriteIds={favoriteIds}
+              initialCategoryId={menuInitialCat}
+              onToggleFavorite={handleToggleFavorite}
+              onSelectItemDetails={(it) => {
+                setEditingCartLine(null);
+                setSelectedProductModal(it);
+              }}
+              onQuickAddItem={handleQuickAddItem}
+              onUpdateLineQty={handleUpdateLineQty}
+              onEditCartLine={(item, line) => {
+                setEditingCartLine(line);
+                setSelectedProductModal(item);
+              }}
+              onClearCart={() => setOrderDraft((prev) => ({ ...prev, items: [] }))}
+              onGoCheckout={() => {
+                setConfirmedOrderState(null);
+                onNavigateRoute('checkout');
+              }}
+            />
+          )}
 
-        {route === 'chat' && (
-          <AIChatView
-            restaurant={restaurant}
-            hoursStatus={hoursStatus}
-            deliveryZones={deliveryZones}
-            items={items}
-            messages={messages}
-            isLoading={chatLoading}
-            isOnline={isOnline}
-            chatOptOut={chatOptOut}
-            onToggleChatOptOut={handleToggleChatOptOut}
-            pendingChallenge={pendingChallenge}
-            challengeSubmitting={challengeSubmitting}
-            onSubmitChallengeVerification={handleSubmitChallengeVerification}
-            onCancelChallenge={() => {
-              setPendingChallenge(null);
-              setPendingRetryMessage(null);
-            }}
-            onSendMessage={handleSendMessage}
-            onResetChat={handleResetChat}
-            onQuickAddItem={handleQuickAddItem}
-            onGoMenu={() => onNavigateRoute('menu')}
-            onGoCheckout={() => {
-              setConfirmedOrderState(null);
-              onNavigateRoute('checkout');
-            }}
-          />
-        )}
+          {route === 'chat' && (
+            <AIChatView
+              restaurant={restaurant}
+              hoursStatus={hoursStatus}
+              deliveryZones={deliveryZones}
+              items={items}
+              messages={messages}
+              isLoading={chatLoading}
+              isOnline={isOnline}
+              chatOptOut={chatOptOut}
+              onToggleChatOptOut={handleToggleChatOptOut}
+              pendingChallenge={pendingChallenge}
+              challengeSubmitting={challengeSubmitting}
+              onSubmitChallengeVerification={handleSubmitChallengeVerification}
+              onCancelChallenge={() => {
+                setPendingChallenge(null);
+                setPendingRetryMessage(null);
+              }}
+              onSendMessage={handleSendMessage}
+              onResetChat={handleResetChat}
+              onQuickAddItem={handleQuickAddItem}
+              onGoMenu={() => onNavigateRoute('menu')}
+              onGoCheckout={() => {
+                setConfirmedOrderState(null);
+                onNavigateRoute('checkout');
+              }}
+            />
+          )}
 
-        {route === 'checkout' && (
-          <CheckoutView
-            restaurant={restaurant}
-            hoursStatus={hoursStatus}
-            items={items}
-            deliveryZones={deliveryZones}
-            branches={branches}
-            activeCoupons={activeCoupons}
-            draft={orderDraft}
-            isOnline={isOnline}
-            onUpdateDraft={setOrderDraft}
-            onUpdateLineQty={handleUpdateLineQty}
-            onEditCartLine={(item, line) => {
-              setEditingCartLine(line);
-              setSelectedProductModal(item);
-            }}
-            onOrderConfirmed={handleOrderConfirmed}
-            confirmedOrderState={confirmedOrderState}
-            onStartNewOrder={() => {
-              setConfirmedOrderState(null);
-              onNavigateRoute('menu');
-            }}
-            onGoMenu={() => onNavigateRoute('menu')}
-            onTrackOrder={(ordNum, ordTok) => onNavigateRoute('track', ordNum, ordTok)}
-          />
-        )}
+          {route === 'checkout' && (
+            <CheckoutView
+              restaurant={restaurant}
+              hoursStatus={hoursStatus}
+              items={items}
+              deliveryZones={deliveryZones}
+              branches={branches}
+              activeCoupons={activeCoupons}
+              draft={orderDraft}
+              isOnline={isOnline}
+              onUpdateDraft={setOrderDraft}
+              onUpdateLineQty={handleUpdateLineQty}
+              onEditCartLine={(item, line) => {
+                setEditingCartLine(line);
+                setSelectedProductModal(item);
+              }}
+              onOrderConfirmed={handleOrderConfirmed}
+              confirmedOrderState={confirmedOrderState}
+              onStartNewOrder={() => {
+                setConfirmedOrderState(null);
+                onNavigateRoute('menu');
+              }}
+              onGoMenu={() => onNavigateRoute('menu')}
+              onTrackOrder={(ordNum, ordTok) => onNavigateRoute('track', ordNum, ordTok)}
+            />
+          )}
 
-        {route === 'track' && (
-          <OrderTrackingView
-            restaurant={restaurant}
-            initialOrderNumber={resolvedTrackOrderNumber}
-            initialOrderToken={resolvedTrackOrderToken}
-          />
-        )}
+          {route === 'track' && (
+            <OrderTrackingView
+              restaurant={restaurant}
+              initialOrderNumber={resolvedTrackOrderNumber}
+              initialOrderToken={resolvedTrackOrderToken}
+            />
+          )}
 
-        {(route === 'orders' || route === 'favorites') && (
-          <OrderHistoryAndFavoritesView
-            mode={route}
-            restaurant={restaurant}
-            items={items}
-            favoriteIds={favoriteIds}
-            localOrderHistory={localOrderHistory}
-            orderTokens={orderTokens}
-            onToggleFavorite={handleToggleFavorite}
-            onSelectItemDetails={(it) => {
-              setEditingCartLine(null);
-              setSelectedProductModal(it);
-            }}
-            onTrackOrder={(ordNum, ordTok) => onNavigateRoute('track', ordNum, ordTok)}
-            onReorder={handleReorder}
-            onGoMenu={() => onNavigateRoute('menu')}
-          />
-        )}
+          {(route === 'orders' || route === 'favorites') && (
+            <OrderHistoryAndFavoritesView
+              mode={route}
+              restaurant={restaurant}
+              items={items}
+              favoriteIds={favoriteIds}
+              localOrderHistory={localOrderHistory}
+              orderTokens={orderTokens}
+              onToggleFavorite={handleToggleFavorite}
+              onSelectItemDetails={(it) => {
+                setEditingCartLine(null);
+                setSelectedProductModal(it);
+              }}
+              onTrackOrder={(ordNum, ordTok) => onNavigateRoute('track', ordNum, ordTok)}
+              onReorder={handleReorder}
+              onGoMenu={() => onNavigateRoute('menu')}
+            />
+          )}
+        </Suspense>
       </main>
 
       <footer className="bg-[#104B34] text-white/85 py-6 px-4 sm:px-6 text-xs border-t border-white/10">
@@ -974,26 +1014,28 @@ export function CustomerPage({
         </div>
       </footer>
 
-      {selectedProductModal && (
-        <ProductDetailsModal
-          item={selectedProductModal}
-          currencyLabel={restaurant.systemSettings.currencyLabel}
-          editingLine={editingCartLine}
-          onClose={() => {
-            setSelectedProductModal(null);
-            setEditingCartLine(null);
-          }}
-          onAddConfiguredItem={handleAddConfiguredItem}
-          onSaveEditedLine={handleSaveEditedLine}
-        />
-      )}
+      <Suspense fallback={null}>
+        {selectedProductModal && (
+          <ProductDetailsModal
+            item={selectedProductModal}
+            currencyLabel={restaurant.systemSettings.currencyLabel}
+            editingLine={editingCartLine}
+            onClose={() => {
+              setSelectedProductModal(null);
+              setEditingCartLine(null);
+            }}
+            onAddConfiguredItem={handleAddConfiguredItem}
+            onSaveEditedLine={handleSaveEditedLine}
+          />
+        )}
 
-      {shareModalOpen && (
-        <ShareMenuModal
-          restaurantName={restaurant.name}
-          onClose={() => setShareModalOpen(false)}
-        />
-      )}
+        {shareModalOpen && (
+          <ShareMenuModal
+            restaurantName={restaurant.name}
+            onClose={() => setShareModalOpen(false)}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

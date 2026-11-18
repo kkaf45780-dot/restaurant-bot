@@ -407,11 +407,19 @@ export async function verifyHumanChallenge(params: {
       });
       if (remoteIp) formBody.set('remoteip', remoteIp);
 
-      const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: formBody.toString(),
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      let res: globalThis.Response;
+      try {
+        res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: formBody.toString(),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       const data = (await res.json()) as { success?: boolean };
       if (!res.ok || !data.success) {
         return {

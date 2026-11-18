@@ -271,10 +271,18 @@ export async function verifyTurnstileOrCaptcha(params: {
       if (params.ip && params.ip !== 'unknown') {
         form.set('remoteip', params.ip);
       }
-      const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-        method: 'POST',
-        body: form,
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      let res: globalThis.Response;
+      try {
+        res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+          method: 'POST',
+          body: form,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (!res.ok) return false;
       const data = (await res.json()) as { success?: boolean };
       return Boolean(data.success);

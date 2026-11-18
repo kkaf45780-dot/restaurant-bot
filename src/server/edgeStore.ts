@@ -2,7 +2,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   COMPROMISED_DEFAULT_PASSWORDS,
   constantTimeEqual,
-  hashPasswordBcrypt,
+  hashPasswordPbkdf2,
   verifyPasswordAgainstHash,
 } from '../../worker/auth.ts';
 import {
@@ -306,7 +306,11 @@ export async function verifySupabaseAdminAccess(
   }
 
   const configuredOwnerEmail = env.ADMIN_EMAIL?.trim().toLowerCase();
-  if (configuredOwnerEmail && cleanEmail === configuredOwnerEmail) {
+  if (
+    configuredOwnerEmail &&
+    cleanEmail === configuredOwnerEmail &&
+    restaurantId === DEFAULT_RESTAURANT_ID
+  ) {
     return { allowed: true, role: 'owner' };
   }
 
@@ -888,14 +892,16 @@ export async function incrementCouponUsage(
   }
 }
 
-export async function listOrders(env: EdgeEnv, restaurantId: string): Promise<Order[]> {
+export async function listOrders(env: EdgeEnv, restaurantId: string, limit = 250): Promise<Order[]> {
+  const safeLimit = Math.max(1, Math.min(500, limit));
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
     const { data, error } = await supabase
       .from('orders')
       .select('*')
       .eq('restaurant_id', restaurantId)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(safeLimit);
     if (error) {
       throw new Error(`فشل قراءة الطلبات من قاعدة البيانات: ${error.message}`);
     }
@@ -908,17 +914,20 @@ export async function listOrders(env: EdgeEnv, restaurantId: string): Promise<Or
   const db = await readEdgeDb(env);
   return db.orders
     .filter((o) => o.restaurantId === restaurantId)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, safeLimit);
 }
 
-export async function listCustomers(env: EdgeEnv, restaurantId: string): Promise<Customer[]> {
+export async function listCustomers(env: EdgeEnv, restaurantId: string, limit = 200): Promise<Customer[]> {
+  const safeLimit = Math.max(1, Math.min(500, limit));
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
     const { data, error } = await supabase
       .from('customers')
       .select('*')
       .eq('restaurant_id', restaurantId)
-      .order('last_order_at', { ascending: false, nullsFirst: false });
+      .order('last_order_at', { ascending: false, nullsFirst: false })
+      .limit(safeLimit);
     if (error) {
       throw new Error(`فشل قراءة بيانات العملاء: ${error.message}`);
     }
@@ -940,7 +949,8 @@ export async function listCustomers(env: EdgeEnv, restaurantId: string): Promise
   const db = await readEdgeDb(env);
   return db.customers
     .filter((c) => c.restaurantId === restaurantId)
-    .sort((a, b) => new Date(b.lastOrderAt || b.createdAt).getTime() - new Date(a.lastOrderAt || a.createdAt).getTime());
+    .sort((a, b) => new Date(b.lastOrderAt || b.createdAt).getTime() - new Date(a.lastOrderAt || a.createdAt).getTime())
+    .slice(0, safeLimit);
 }
 
 export async function findOrderByToken(
@@ -1392,6 +1402,68 @@ export async function updateOrderStatus(
   return updatedOrder;
 }
 
+export async function updateOrderPaymentStatus(
+  env: EdgeEnv,
+  restaurantId: string,
+  orderId: string,
+  paymentStatus: 'pending' | 'paid',
+  actorName = 'المدير'
+): Promise<Order | null> {
+  const nowIso = new Date().toISOString();
+  const supabase = getSupabaseAdminClient(env);
+
+  if (supabase) {
+    const { data: existing, error: fetchErr } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .eq('restaurant_id', restaurantId)
+      .maybeSingle();
+    if (fetchErr) {
+      throw new Error(`فشل قراءة الطلب: ${fetchErr.message}`);
+    }
+    if (!existing) return null;
+
+    const { error: updErr } = await supabase
+      .from('orders')
+      .update({ payment_status: paymentStatus, updated_at: nowIso })
+      .eq('id', orderId)
+      .eq('restaurant_id', restaurantId);
+    if (updErr) {
+      throw new Error(`فشل تحديث حالة الدفع: ${updErr.message}`);
+    }
+
+    const mapped = mapSupabaseOrder(existing);
+    const updatedOrder: Order = { ...mapped, paymentStatus, updatedAt: nowIso };
+    await appendActivityLog(env, {
+      id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      restaurantId,
+      actorName,
+      action: `تحديث حالة الدفع للطلب #${updatedOrder.orderNumber}`,
+      details: paymentStatus === 'paid' ? 'تم تأكيد الدفع' : 'تمت إعادة الحالة إلى غير مدفوع',
+      createdAt: nowIso,
+    }).catch(() => {});
+    return updatedOrder;
+  }
+
+  const db = await readEdgeDb(env);
+  const idx = db.orders.findIndex((o) => o.id === orderId && o.restaurantId === restaurantId);
+  if (idx < 0) return null;
+  const updatedOrder: Order = { ...db.orders[idx], paymentStatus, updatedAt: nowIso };
+  db.orders[idx] = updatedOrder;
+  db.activityLogs.unshift({
+    id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+    restaurantId,
+    actorName,
+    action: `تحديث حالة الدفع للطلب #${updatedOrder.orderNumber}`,
+    details: paymentStatus === 'paid' ? 'تم تأكيد الدفع' : 'تمت إعادة الحالة إلى غير مدفوع',
+    createdAt: nowIso,
+  });
+  db.activityLogs = db.activityLogs.slice(0, 100);
+  await writeEdgeDb(env, db);
+  return updatedOrder;
+}
+
 export async function rateOrderByToken(
   env: EdgeEnv,
   restaurantId: string,
@@ -1578,47 +1650,182 @@ export async function findEmployeeByEmail(
   }
 
   const db = await readEdgeDb(env);
-  return (
-    db.employees.find(
-      (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean && e.isActive
-    ) ?? null
+  const found = db.employees.find(
+    (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean && e.isActive
   );
+  if (!found) return null;
+  const { passwordHash: _omitted, ...safe } = found;
+  return safe;
 }
 
-export async function upsertEmployee(env: EdgeEnv, emp: Employee): Promise<Employee> {
+export async function findEmployeeForLogin(
+  env: EdgeEnv,
+  email: string,
+  restaurantId?: string
+): Promise<{ employee: Employee; passwordHash?: string } | null> {
+  const clean = email.trim().toLowerCase();
+  if (!clean) return null;
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
-    const { error } = await supabase.from('employees').upsert({
+    let query = supabase
+      .from('employees')
+      .select('id, restaurant_id, name, email, phone, role, password_hash, must_change_password, is_active, created_at')
+      .ilike('email', clean)
+      .eq('is_active', true);
+    if (restaurantId) {
+      query = query.eq('restaurant_id', restaurantId);
+    }
+    const { data, error } = await query.limit(1).maybeSingle();
+    if (error) {
+      throw new Error(`فشل التحقق من بيانات الموظف: ${error.message}`);
+    }
+    if (!data) return null;
+    return {
+      employee: {
+        id: String(data.id),
+        restaurantId: String(data.restaurant_id),
+        name: String(data.name),
+        email: String(data.email),
+        phone: String(data.phone ?? ''),
+        role: String(data.role) as EmployeeRole,
+        mustChangePassword: Boolean(data.must_change_password),
+        isActive: Boolean(data.is_active),
+        createdAt: String(data.created_at),
+      },
+      passwordHash: data.password_hash ? String(data.password_hash) : undefined,
+    };
+  }
+
+  const db = await readEdgeDb(env);
+  const found = db.employees.find(
+    (e) =>
+      e.email.toLowerCase() === clean &&
+      e.isActive &&
+      (!restaurantId || e.restaurantId === restaurantId)
+  );
+  if (!found) return null;
+  const { passwordHash, ...safe } = found;
+  return { employee: safe, passwordHash };
+}
+
+export async function upsertEmployee(
+  env: EdgeEnv,
+  emp: Employee & { password?: string }
+): Promise<Employee> {
+  const newPasswordHash =
+    typeof emp.password === 'string' && emp.password.trim().length > 0
+      ? await hashPasswordPbkdf2(emp.password.trim())
+      : emp.passwordHash;
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data: existingRow } = await supabase
+      .from('employees')
+      .select('password_hash, must_change_password')
+      .eq('id', emp.id)
+      .eq('restaurant_id', emp.restaurantId)
+      .maybeSingle();
+
+    const effectiveHash =
+      newPasswordHash ?? (existingRow?.password_hash ? String(existingRow.password_hash) : undefined);
+    const effectiveMustChange =
+      typeof emp.password === 'string' && emp.password.trim().length > 0
+        ? (emp.mustChangePassword ?? true)
+        : (emp.mustChangePassword ?? Boolean(existingRow?.must_change_password ?? true));
+
+    const payload: Record<string, unknown> = {
       id: emp.id,
       restaurant_id: emp.restaurantId,
       name: emp.name,
       email: emp.email.trim().toLowerCase(),
       phone: emp.phone ?? '',
       role: emp.role,
-      must_change_password: Boolean(emp.mustChangePassword ?? true),
+      must_change_password: effectiveMustChange,
       is_active: emp.isActive,
       created_at: emp.createdAt,
-    });
+    };
+    if (effectiveHash) {
+      payload.password_hash = effectiveHash;
+    }
+
+    const { error } = await supabase.from('employees').upsert(payload);
     if (error) {
       throw new Error(`فشل حفظ بيانات الموظف: ${error.message}`);
     }
-    const { passwordHash: _omitted, ...safe } = emp;
-    return safe;
+    return {
+      id: emp.id,
+      restaurantId: emp.restaurantId,
+      name: emp.name,
+      email: emp.email.trim().toLowerCase(),
+      phone: emp.phone ?? '',
+      role: emp.role,
+      isActive: emp.isActive,
+      mustChangePassword: effectiveMustChange,
+      createdAt: emp.createdAt,
+    };
   }
 
   const db = await readEdgeDb(env);
   const idx = db.employees.findIndex((e) => e.id === emp.id);
   const existing = idx >= 0 ? db.employees[idx] : null;
+  const effectiveMustChange =
+    typeof emp.password === 'string' && emp.password.trim().length > 0
+      ? (emp.mustChangePassword ?? true)
+      : (emp.mustChangePassword ?? existing?.mustChangePassword ?? true);
   const toSave: Employee = {
-    ...emp,
-    passwordHash: emp.passwordHash ?? existing?.passwordHash,
-    mustChangePassword: emp.mustChangePassword ?? existing?.mustChangePassword,
+    id: emp.id,
+    restaurantId: emp.restaurantId,
+    name: emp.name,
+    email: emp.email.trim().toLowerCase(),
+    phone: emp.phone ?? '',
+    role: emp.role,
+    isActive: emp.isActive,
+    passwordHash: newPasswordHash ?? existing?.passwordHash,
+    mustChangePassword: effectiveMustChange,
+    createdAt: emp.createdAt,
   };
   if (idx >= 0) db.employees[idx] = toSave;
   else db.employees.unshift(toSave);
   await writeEdgeDb(env, db);
   const { passwordHash: _omitted, ...safe } = toSave;
   return safe;
+}
+
+export async function updateEmployeePassword(
+  env: EdgeEnv,
+  restaurantId: string,
+  email: string,
+  newPassword: string
+): Promise<boolean> {
+  const clean = email.trim().toLowerCase();
+  if (!clean) return false;
+  const hashed = await hashPasswordPbkdf2(newPassword);
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('employees')
+      .update({ password_hash: hashed, must_change_password: false })
+      .eq('restaurant_id', restaurantId)
+      .ilike('email', clean)
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      throw new Error(`فشل تحديث كلمة مرور الموظف: ${error.message}`);
+    }
+    return Boolean(data);
+  }
+
+  const db = await readEdgeDb(env);
+  const idx = db.employees.findIndex(
+    (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean
+  );
+  if (idx < 0) return false;
+  db.employees[idx] = {
+    ...db.employees[idx],
+    passwordHash: hashed,
+    mustChangePassword: false,
+  };
+  await writeEdgeDb(env, db);
+  return true;
 }
 
 export async function deleteEmployee(
@@ -1834,7 +2041,7 @@ export async function verifyAdminPassword(env: EdgeEnv, candidate: string): Prom
 
 export async function setAdminPassword(env: EdgeEnv, newPassword: string): Promise<void> {
   const db = await readEdgeDb(env);
-  db.adminPasswordOverride = await hashPasswordBcrypt(newPassword);
+  db.adminPasswordOverride = await hashPasswordPbkdf2(newPassword);
   await writeEdgeDb(env, db);
 }
 
@@ -1864,4 +2071,56 @@ export async function uploadImageAsset(
   }
 
   return `data:${mimeType};base64,${cleanBase64}`;
+}
+
+export async function probeBackendHealth(env: EdgeEnv): Promise<{
+  ok: boolean;
+  storageMode: 'supabase' | 'local';
+  dbConnected: boolean;
+  storageConnected: boolean;
+  dbLatencyMs: number;
+}> {
+  const startedAt = Date.now();
+  const supabase = getSupabaseAdminClient(env);
+  if (!supabase) {
+    const requireSupa = isProductionSupabaseRequired(env);
+    return {
+      ok: !requireSupa,
+      storageMode: 'local',
+      dbConnected: !requireSupa,
+      storageConnected: true,
+      dbLatencyMs: Date.now() - startedAt,
+    };
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const probePromise = Promise.all([
+      supabase.from('restaurants').select('id').limit(1),
+      supabase.storage.getBucket('restaurant-assets'),
+    ]);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('DB_HEALTH_TIMEOUT')), 3000);
+    });
+    const [dbRes, storageRes] = await Promise.race([probePromise, timeoutPromise]);
+    const dbConnected = !dbRes.error;
+    const storageConnected = !storageRes.error;
+    return {
+      ok: dbConnected,
+      storageMode: 'supabase',
+      dbConnected,
+      storageConnected,
+      dbLatencyMs: Date.now() - startedAt,
+    };
+  } catch {
+    return {
+      ok: false,
+      storageMode: 'supabase',
+      dbConnected: false,
+      storageConnected: false,
+      dbLatencyMs: Date.now() - startedAt,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

@@ -4,7 +4,7 @@ import { adminLoginLocal, ApiError, fetchAdminMe } from '../../lib/api.ts';
 import { isSupabaseClientConfigured, supabase } from '../../lib/supabase.ts';
 
 interface AdminLoginProps {
-  onSuccess: (token: string, email: string) => void;
+  onSuccess: (token: string, email: string, mustChangePassword?: boolean) => void;
   onBackToStore: () => void;
 }
 
@@ -43,14 +43,14 @@ export function AdminLogin({
 
     setLoading(true);
     try {
-      // Cloudflare owner credentials are the primary admin login method.
-      // Try them first so a slow/unavailable Supabase Auth request cannot block the owner.
+      // Cloudflare owner & employee credentials are the primary admin login method.
+      // Try them first so a slow/unavailable Supabase Auth request cannot block login.
       try {
         const localRes = await adminLoginLocal(email.trim(), password);
-        onSuccess(localRes.token, localRes.email);
+        onSuccess(localRes.token, localRes.email, Boolean(localRes.mustChangePassword));
         return;
       } catch (localError) {
-        // Only a normal credential mismatch should fall through to Supabase employee auth.
+        // Only a normal credential mismatch should fall through to Supabase Auth.
         if (localError instanceof ApiError && localError.status !== 401) {
           throw localError;
         }
@@ -67,17 +67,19 @@ export function AdminLogin({
         );
 
         if (!error && data.session?.access_token) {
+          let meMustChange = false;
           try {
-            await withTimeout(
+            const me = await withTimeout(
               fetchAdminMe(data.session.access_token),
               8000,
               'تم التحقق من الحساب لكن تأخر تحميل صلاحيات المدير. حاول مرة أخرى.'
             );
+            meMustChange = Boolean(me.mustChangePassword);
           } catch (error) {
             await supabase.auth.signOut().catch(() => {});
             throw error;
           }
-          onSuccess(data.session.access_token, data.user?.email ?? email.trim());
+          onSuccess(data.session.access_token, data.user?.email ?? email.trim(), meMustChange);
           return;
         }
       }

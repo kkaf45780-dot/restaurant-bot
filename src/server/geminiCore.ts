@@ -90,7 +90,7 @@ function buildAuthoritativeStateJson(
       aiOrderIntake,
       currency: restaurant.systemSettings.currencyLabel,
       categories: categories.map((c) => ({ id: c.id, name: c.name })),
-      catalog: items.map((i) => ({
+      catalog: items.slice(0, 150).map((i) => ({
         itemId: i.id,
         categoryId: i.categoryId,
         name: i.name,
@@ -408,10 +408,15 @@ export async function runReceptionistChatCore(params: {
           },
         },
       });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Gemini request timeout (15s)')), 15000)
-      );
-      return Promise.race([genPromise, timeoutPromise]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Gemini request timeout (15s)')), 15000);
+      });
+      try {
+        return await Promise.race([genPromise, timeoutPromise]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     };
 
     let activeModel = model;

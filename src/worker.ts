@@ -9,6 +9,17 @@ import {
 import { calculateOrderTotals } from './lib/pricing.ts';
 import { buildWhatsAppOrderUrl } from './lib/whatsapp.ts';
 import {
+  COMPROMISED_DEFAULT_PASSWORDS,
+  verifyPasswordAgainstHash,
+} from '../worker/auth.ts';
+import {
+  applySecurityHeaders,
+  handleCorsPreflight,
+  isKnownSpaRoute,
+  isStaticAssetPath,
+} from '../worker/middleware/security.ts';
+import { decodeBase64ToBytes, detectValidImageFromBytes } from './lib/uploadValidation.ts';
+import {
   type EdgeEnv,
   adjustItemStock,
   appendActivityLog,
@@ -20,7 +31,7 @@ import {
   deleteDeliveryZone,
   deleteEmployee,
   deleteMenuItem,
-  findEmployeeByEmail,
+  findEmployeeForLogin,
   findOrderByIdempotencyKey,
   findOrderByNumberOrId,
   findRestaurantBundle,
@@ -36,9 +47,12 @@ import {
   listNotifications,
   listOrders,
   markNotificationsRead,
+  probeBackendHealth,
   rateOrder,
   reorderMenuItems,
   setAdminPassword,
+  updateEmployeePassword,
+  updateOrderPaymentStatus,
   updateOrderStatus,
   updateRestaurant,
   uploadImageAsset,
@@ -88,40 +102,17 @@ const VALID_ROLES: EmployeeRole[] = ['owner', 'manager', 'cashier', 'kitchen'];
 const DEFAULT_SESSION_SECRET = 'meshweyat-elhara-local-session-secret-2026';
 
 function createKvAdapter(env: EdgeEnv): KVStoreLike | undefined {
-  if (!env.RESTAURANT_DB) return undefined;
+  const kv = env.RATE_LIMIT_KV || env.RESTAURANT_DB;
+  if (!kv) return undefined;
   return {
     get: async (key: string) => {
-      const val = await env.RESTAURANT_DB!.get(key, 'text');
+      const val = await kv.get(key, 'text');
       return typeof val === 'string' ? val : null;
     },
     put: async (key: string, value: string, options?: { expirationTtl?: number }) => {
-      await env.RESTAURANT_DB!.put(key, value, options);
+      await kv.put(key, value, options);
     },
   };
-}
-
-function withSecurityHeaders(
-  response: Response,
-  options?: { noStore?: boolean; isHtml?: boolean }
-): Response {
-  const headers = new Headers(response.headers);
-  headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  headers.set('X-Frame-Options', 'DENY');
-  headers.set(
-    'Content-Security-Policy',
-    "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com; frame-ancestors 'none'"
-  );
-  if (options?.noStore) {
-    headers.set('Cache-Control', 'no-store');
-  } else if (options?.isHtml) {
-    headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  }
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -159,7 +150,9 @@ async function hmacSign(secret: string, data: string): Promise<string> {
 async function signAdminToken(
   secret: string,
   email: string,
-  role: EmployeeRole = 'owner'
+  role: EmployeeRole = 'owner',
+  restaurantId: string = DEFAULT_RESTAURANT_ID,
+  mustChangePassword = false
 ): Promise<string> {
   if (!secret || secret.length < 32) {
     throw new Error('ADMIN_SESSION_SECRET must be configured with at least 32 characters.');
@@ -167,6 +160,8 @@ async function signAdminToken(
   const payloadJson = JSON.stringify({
     email,
     role,
+    restaurantId,
+    mustChangePassword,
     exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
   });
   const payload = toBase64Url(new TextEncoder().encode(payloadJson));
@@ -177,7 +172,12 @@ async function signAdminToken(
 async function verifyLocalAdminToken(
   secret: string,
   token: string
-): Promise<{ email: string; role: EmployeeRole } | null> {
+): Promise<{
+  email: string;
+  role: EmployeeRole;
+  restaurantId: string;
+  mustChangePassword: boolean;
+} | null> {
   if (!secret || secret.length < 32 || !token.startsWith('local.')) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
@@ -189,12 +189,19 @@ async function verifyLocalAdminToken(
     const decoded = JSON.parse(decodedStr) as {
       email: string;
       role?: EmployeeRole;
+      restaurantId?: string;
+      mustChangePassword?: boolean;
       exp: number;
     };
     if (decoded.exp < Date.now()) return null;
     const role: EmployeeRole =
       decoded.role && VALID_ROLES.includes(decoded.role) ? decoded.role : 'owner';
-    return { email: decoded.email, role };
+    return {
+      email: decoded.email,
+      role,
+      restaurantId: String(decoded.restaurantId || DEFAULT_RESTAURANT_ID),
+      mustChangePassword: Boolean(decoded.mustChangePassword),
+    };
   } catch {
     return null;
   }
@@ -206,10 +213,33 @@ function getSessionSecret(env: EdgeEnv): string {
   return env.ADMIN_SESSION_SECRET || DEFAULT_SESSION_SECRET;
 }
 
+interface VerifiedAdminIdentity {
+  email: string;
+  role: EmployeeRole;
+  restaurantId: string;
+  mustChangePassword: boolean;
+  authType: 'local' | 'supabase';
+}
+
+function authorizeRestaurantAccess(
+  auth: VerifiedAdminIdentity,
+  targetRestaurantId: string
+): Response | null {
+  if (auth.restaurantId !== targetRestaurantId) {
+    return Response.json(
+      { error: 'غير مصرح لك بالوصول إلى بيانات هذا المطعم.' },
+      { status: 403 }
+    );
+  }
+  return null;
+}
+
 async function verifyAdminRequest(
   request: Request,
-  env: EdgeEnv
-): Promise<{ email: string; role: EmployeeRole } | Response> {
+  env: EdgeEnv,
+  pathname: string,
+  targetRestaurantId: string
+): Promise<VerifiedAdminIdentity | Response> {
   const authHeader = request.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
 
@@ -233,15 +263,21 @@ async function verifyAdminRequest(
           env,
           data.user.id,
           userEmail,
-          DEFAULT_RESTAURANT_ID
+          targetRestaurantId
         );
         if (!access.allowed) {
           return Response.json(
-            { error: 'هذا الحساب غير مصرح له بإدارة لوحة التحكم.' },
+            { error: 'هذا الحساب غير مصرح له بإدارة هذا المطعم.' },
             { status: 403 }
           );
         }
-        return { email: userEmail || 'admin', role: access.role ?? 'owner' };
+        return {
+          email: userEmail || 'admin',
+          role: access.role ?? 'owner',
+          restaurantId: targetRestaurantId,
+          mustChangePassword: false,
+          authType: 'supabase',
+        };
       }
     } catch {
       // Fall through to 401
@@ -250,7 +286,26 @@ async function verifyAdminRequest(
 
   const localAdmin = await verifyLocalAdminToken(getSessionSecret(env), token);
   if (localAdmin) {
-    return localAdmin;
+    if (
+      localAdmin.mustChangePassword &&
+      pathname !== '/api/admin/me' &&
+      pathname !== '/api/admin/password'
+    ) {
+      return Response.json(
+        {
+          error: 'يجب تغيير كلمة المرور المؤقتة قبل استخدام لوحة التحكم.',
+          mustChangePassword: true,
+        },
+        { status: 403 }
+      );
+    }
+    return {
+      email: localAdmin.email,
+      role: localAdmin.role,
+      restaurantId: localAdmin.restaurantId,
+      mustChangePassword: localAdmin.mustChangePassword,
+      authType: 'local',
+    };
   }
 
   return Response.json(
@@ -304,7 +359,15 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
   const method = request.method.toUpperCase();
 
   if (method === 'GET' && pathname === '/api/health') {
-    return Response.json({ ok: true, service: 'moazzaf-almatam', runtime: 'cloudflare-workers' });
+    const health = await probeBackendHealth(env);
+    return Response.json(
+      {
+        service: 'moazzaf-almatam',
+        runtime: 'cloudflare-workers',
+        ...health,
+      },
+      { status: health.ok ? 200 : 503 }
+    );
   }
 
   if (method === 'GET' && pathname === '/api/config/status') {
@@ -359,6 +422,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
   if (method === 'POST' && pathname === '/api/coupons/validate') {
     try {
+      const ipHash = await hashIpForLog(clientIp);
+      const rl = await checkSlidingRateLimit(`coupon:${ipHash}`, 20, 60, kv);
+      if (!rl.allowed) {
+        return Response.json(
+          { error: 'تم إرسال محاولات كثيرة، يُرجى الانتظار دقيقة.' },
+          {
+            status: 429,
+            headers: { 'Retry-After': String(rl.retryAfterSeconds) },
+          }
+        );
+      }
       const body = await readJsonBody<{
         restaurantId?: string;
         code?: string;
@@ -413,6 +487,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
   if (method === 'GET' && pathname === '/api/orders/track') {
     try {
+      const ipHash = await hashIpForLog(clientIp);
+      const rl = await checkSlidingRateLimit(`track:${ipHash}`, 30, 60, kv);
+      if (!rl.allowed) {
+        return Response.json(
+          { error: 'تم إرسال طلبات تتبع كثيرة، يُرجى الانتظار دقيقة.' },
+          {
+            status: 429,
+            headers: { 'Retry-After': String(rl.retryAfterSeconds) },
+          }
+        );
+      }
       const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
       const orderNumber = (url.searchParams.get('orderNumber') || '').trim();
       const token = (url.searchParams.get('token') || '').trim();
@@ -608,6 +693,13 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         return Response.json({ error: 'يُرجى كتابة رسالة قبل الإرسال.' }, { status: 400 });
       }
 
+      if (message.trim().length > 1000) {
+        return Response.json(
+          { error: 'الرسالة طويلة جداً (الحد الأقصى ١٠٠٠ حرف).' },
+          { status: 400 }
+        );
+      }
+
       if (
         humanVerified === true ||
         isForbiddenBypassToken(verification?.token) ||
@@ -691,10 +783,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         return Response.json({ error: 'المطعم غير موجود' }, { status: 404 });
       }
 
+      const safeHistory = Array.isArray(history)
+        ? history
+            .slice(-10)
+            .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.text === 'string')
+            .map((h) => ({ role: h.role, text: h.text.slice(0, 1000) }))
+        : [];
+
       const result = await runReceptionistChatCore({
         bundle,
         userMessage: message.trim(),
-        history: Array.isArray(history) ? history : [],
+        history: safeHistory,
         currentDraft: {
           fulfillmentType: 'delivery',
           ...orderDraft,
@@ -717,6 +816,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
   if (method === 'POST' && pathname === '/api/orders') {
     try {
+      const ipHash = await hashIpForLog(clientIp);
+      const orderRl = await checkSlidingRateLimit(`order:${ipHash}`, 15, 60, kv);
+      if (!orderRl.allowed) {
+        return Response.json(
+          { error: 'تم إرسال طلبات كثيرة في وقت قصير، يُرجى الانتظار دقيقة.' },
+          {
+            status: 429,
+            headers: { 'Retry-After': String(orderRl.retryAfterSeconds) },
+          }
+        );
+      }
       const body = await readJsonBody<{
         restaurantId?: string;
         items?: OrderDraftItem[];
@@ -949,30 +1059,68 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         );
       }
 
-      const body = await readJsonBody<{ email?: string; password?: string }>(request);
+      const body = await readJsonBody<{
+        email?: string;
+        password?: string;
+        restaurantId?: string;
+      }>(request);
       const cleanEmail = String(body.email || '').trim().toLowerCase();
       const cleanPass = String(body.password || '');
+      const requestedRestaurantId =
+        typeof body.restaurantId === 'string' && body.restaurantId.trim()
+          ? body.restaurantId.trim()
+          : undefined;
       const expectedEmail = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-      const isPasswordValid = await verifyAdminPassword(env, cleanPass);
 
-      if (cleanEmail === expectedEmail && isPasswordValid) {
-        const role: EmployeeRole = 'owner';
-        const token = await signAdminToken(secret, expectedEmail, role);
-        return Response.json({
-          token,
-          email: expectedEmail,
-          role,
-          permissions: ROLE_PERMISSIONS[role],
-        });
+      if (!cleanEmail || !cleanPass || COMPROMISED_DEFAULT_PASSWORDS.has(cleanPass)) {
+        return Response.json(
+          { error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.' },
+          { status: 401 }
+        );
       }
 
-      const employee = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, cleanEmail);
-      if (employee && isPasswordValid) {
-        const token = await signAdminToken(secret, employee.email, employee.role);
+      if (cleanEmail === expectedEmail) {
+        const ownerValid = await verifyAdminPassword(env, cleanPass);
+        if (ownerValid) {
+          const role: EmployeeRole = 'owner';
+          const tenantId = requestedRestaurantId || DEFAULT_RESTAURANT_ID;
+          const token = await signAdminToken(secret, expectedEmail, role, tenantId, false);
+          return Response.json({
+            token,
+            email: expectedEmail,
+            role,
+            restaurantId: tenantId,
+            mustChangePassword: false,
+            permissions: ROLE_PERMISSIONS[role],
+          });
+        }
+        return Response.json(
+          { error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.' },
+          { status: 401 }
+        );
+      }
+
+      const foundEmployee = await findEmployeeForLogin(env, cleanEmail, requestedRestaurantId);
+      if (
+        foundEmployee &&
+        foundEmployee.passwordHash &&
+        (await verifyPasswordAgainstHash(cleanPass, foundEmployee.passwordHash))
+      ) {
+        const { employee } = foundEmployee;
+        const mustChangePassword = Boolean(employee.mustChangePassword);
+        const token = await signAdminToken(
+          secret,
+          employee.email,
+          employee.role,
+          employee.restaurantId,
+          mustChangePassword
+        );
         return Response.json({
           token,
           email: employee.email,
           role: employee.role,
+          restaurantId: employee.restaurantId,
+          mustChangePassword,
           permissions: ROLE_PERMISSIONS[employee.role],
         });
       }
@@ -987,7 +1135,28 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
   }
 
   if (pathname.startsWith('/api/admin/')) {
-    const auth = await verifyAdminRequest(request, env);
+    const queryRestaurantId = url.searchParams.get('restaurantId') || '';
+    let targetRestaurantId = queryRestaurantId;
+    if (
+      !targetRestaurantId &&
+      method !== 'GET' &&
+      (request.headers.get('content-type') || '').includes('application/json')
+    ) {
+      try {
+        const clonedBody = (await request.clone().json()) as { restaurantId?: unknown };
+        if (typeof clonedBody?.restaurantId === 'string' && clonedBody.restaurantId.trim()) {
+          targetRestaurantId = clonedBody.restaurantId.trim();
+        }
+      } catch {
+        // Ignore malformed JSON here; route handler handles body parsing safely
+      }
+    }
+    const auth = await verifyAdminRequest(
+      request,
+      env,
+      pathname,
+      targetRestaurantId || DEFAULT_RESTAURANT_ID
+    );
     if (auth instanceof Response) return auth;
 
     if (method === 'GET' && pathname === '/api/admin/me') {
@@ -995,13 +1164,17 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         authenticated: true,
         email: auth.email,
         role: auth.role,
+        restaurantId: auth.restaurantId,
+        mustChangePassword: auth.mustChangePassword,
         permissions: ROLE_PERMISSIONS[auth.role],
       });
     }
 
     if (method === 'GET' && pathname === '/api/admin/overview') {
       try {
-        const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const restaurantId = queryRestaurantId || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         const [
           bundle,
           orders,
@@ -1049,6 +1222,9 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       try {
         const body = await readJsonBody<{ restaurantId?: string } & Record<string, unknown>>(request);
         const { restaurantId = DEFAULT_RESTAURANT_ID, ...patch } = body;
+        const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         const aiPatch = patch.aiSettings as { model?: string } | undefined;
         if (aiPatch?.model && !(ALLOWED_AI_MODELS as readonly string[]).includes(String(aiPatch.model))) {
           return Response.json(
@@ -1056,11 +1232,11 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
             { status: 400 }
           );
         }
-        const updated = await updateRestaurant(env, restaurantId, patch);
+        const updated = await updateRestaurant(env, targetId, patch);
         const hoursStatus = evaluateRestaurantHours(updated);
         await appendActivityLog(env, {
           id: `act_${Date.now()}`,
-          restaurantId,
+          restaurantId: targetId,
           actorName: auth.email || 'المدير',
           action: 'تحديث إعدادات المطعم',
           details: 'تم تعديل معلومات المطعم أو المواعيد أو إعدادات المساعد الذكي.',
@@ -1077,9 +1253,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const body = await readJsonBody<Record<string, unknown>>(request);
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         const cat: MenuCategory = {
           id: String(body.id || `cat_${Date.now()}`),
-          restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
+          restaurantId: targetId,
           name: String(body.name || '').trim(),
           description: String(body.description || '').trim(),
           sortOrder: Number(body.sortOrder ?? 99),
@@ -1102,6 +1281,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         await deleteCategory(env, restaurantId, decodeURIComponent(delCatMatch[1]));
         return Response.json({ ok: true });
       } catch (err) {
@@ -1118,13 +1299,16 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const body = await readJsonBody<Record<string, unknown>>(request);
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         const price = Number(body.price);
         if (!String(body.name || '').trim() || !Number.isFinite(price) || price < 0) {
           return Response.json({ error: 'يُرجى إدخال اسم الصنف وسعر صحيح.' }, { status: 400 });
         }
         const item: MenuItem = {
           id: String(body.id || `item_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`),
-          restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
+          restaurantId: targetId,
           categoryId: String(body.categoryId),
           name: String(body.name).trim(),
           description: String(body.description || '').trim(),
@@ -1155,6 +1339,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       try {
         const body = await readJsonBody<{ restaurantId?: string; orderedIds?: string[] }>(request);
         const { restaurantId = DEFAULT_RESTAURANT_ID, orderedIds = [] } = body;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         if (!Array.isArray(orderedIds)) {
           return Response.json({ error: 'بيانات الترتيب غير صالحة.' }, { status: 400 });
         }
@@ -1175,6 +1361,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         await deleteMenuItem(env, restaurantId, decodeURIComponent(delItemMatch[1]));
         return Response.json({ ok: true });
       } catch (err) {
@@ -1202,6 +1390,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           delta,
           reason = 'تعديل مخزون يدوي',
         } = body;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         const numDelta = Math.trunc(Number(delta));
         if (!itemId || !Number.isFinite(numDelta) || numDelta === 0) {
           return Response.json(
@@ -1227,6 +1417,9 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const body = await readJsonBody<Record<string, unknown>>(request);
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         const fee = Number(body.fee);
         const minOrderAmount = Math.max(0, Number(body.minOrderAmount ?? 0));
         if (!String(body.name || '').trim() || !Number.isFinite(fee) || fee < 0) {
@@ -1237,7 +1430,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         }
         const zone: DeliveryZone = {
           id: String(body.id || `zone_${Date.now()}`),
-          restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
+          restaurantId: targetId,
           name: String(body.name).trim(),
           fee,
           minOrderAmount,
@@ -1257,6 +1450,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         await deleteDeliveryZone(env, restaurantId, decodeURIComponent(delZoneMatch[1]));
         return Response.json({ ok: true });
       } catch {
@@ -1269,12 +1464,15 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const body = await readJsonBody<Record<string, unknown>>(request);
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         if (!String(body.name || '').trim()) {
           return Response.json({ error: 'يُرجى إدخال اسم الفرع.' }, { status: 400 });
         }
         const branch: RestaurantBranch = {
           id: String(body.id || `br_${Date.now()}`),
-          restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
+          restaurantId: targetId,
           name: String(body.name).trim(),
           address: String(body.address || '').trim(),
           phone: String(body.phone || '').trim(),
@@ -1294,6 +1492,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         await deleteBranch(env, restaurantId, decodeURIComponent(delBranchMatch[1]));
         return Response.json({ ok: true });
       } catch {
@@ -1306,6 +1506,9 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const body = await readJsonBody<Record<string, unknown>>(request);
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         const val = Number(body.discountValue);
         if (!String(body.code || '').trim() || !Number.isFinite(val) || val <= 0) {
           return Response.json(
@@ -1315,7 +1518,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         }
         const coupon: Coupon = {
           id: String(body.id || `cpn_${Date.now()}`),
-          restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
+          restaurantId: targetId,
           code: String(body.code).trim().toUpperCase(),
           description: String(body.description || '').trim(),
           discountType: body.discountType === 'fixed' ? 'fixed' : 'percentage',
@@ -1347,6 +1550,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         await deleteCoupon(env, restaurantId, decodeURIComponent(delCouponMatch[1]));
         return Response.json({ ok: true });
       } catch {
@@ -1359,22 +1564,43 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const body = await readJsonBody<Record<string, unknown>>(request);
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
         if (!String(body.name || '').trim() || !String(body.email || '').trim()) {
           return Response.json(
             { error: 'اسم الموظف والبريد الإلكتروني مطلوبان.' },
             { status: 400 }
           );
         }
+        const rawPassword = typeof body.password === 'string' ? body.password.trim() : '';
+        if (rawPassword) {
+          if (COMPROMISED_DEFAULT_PASSWORDS.has(rawPassword) || rawPassword.length < 8) {
+            return Response.json(
+              { error: 'كلمة مرور الموظف يجب أن تكون 8 أحرف على الأقل وألا تكون شائعة.' },
+              { status: 400 }
+            );
+          }
+        }
         const rawRole = String(body.role || 'cashier') as EmployeeRole;
-        const employee: Employee = {
+        const employee: Employee & { password?: string } = {
           id: String(body.id || `emp_${Date.now()}`),
-          restaurantId: String(body.restaurantId || DEFAULT_RESTAURANT_ID),
+          restaurantId: targetId,
           name: String(body.name).trim(),
-          email: String(body.email).trim(),
+          email: String(body.email).trim().toLowerCase(),
           phone: String(body.phone || '').trim(),
           role: VALID_ROLES.includes(rawRole) ? rawRole : 'cashier',
           isActive: body.isActive !== false,
+          mustChangePassword:
+            rawPassword
+              ? body.mustChangePassword !== undefined
+                ? Boolean(body.mustChangePassword)
+                : true
+              : body.mustChangePassword !== undefined
+              ? Boolean(body.mustChangePassword)
+              : undefined,
           createdAt: String(body.createdAt || new Date().toISOString()),
+          ...(rawPassword ? { password: rawPassword } : {}),
         };
         const saved = await upsertEmployee(env, employee);
         return Response.json({ employee: saved });
@@ -1389,6 +1615,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         await deleteEmployee(env, restaurantId, decodeURIComponent(delEmpMatch[1]));
         return Response.json({ ok: true });
       } catch {
@@ -1399,7 +1627,10 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
     if (method === 'POST' && pathname === '/api/admin/notifications/read') {
       try {
         const body = await readJsonBody<{ restaurantId?: string }>(request);
-        await markNotificationsRead(env, body.restaurantId || DEFAULT_RESTAURANT_ID);
+        const targetId = body.restaurantId || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, targetId);
+        if (tenantDenied) return tenantDenied;
+        await markNotificationsRead(env, targetId);
         return Response.json({ ok: true });
       } catch {
         return Response.json({ error: 'تعذر تحديث الإشعارات.' }, { status: 500 });
@@ -1412,6 +1643,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         const order = await findOrderByNumberOrId(
           env,
           restaurantId,
@@ -1432,6 +1665,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       try {
         const body = await readJsonBody<{ restaurantId?: string; status?: OrderStatus }>(request);
         const { restaurantId = DEFAULT_RESTAURANT_ID, status } = body;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         const validStatuses: OrderStatus[] = [
           'received',
           'under_review',
@@ -1462,11 +1697,46 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       }
     }
 
+    const orderPaymentMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)\/payment$/);
+    if (method === 'PATCH' && orderPaymentMatch) {
+      const denied = checkPermission(auth.role, 'orders');
+      if (denied) return denied;
+      try {
+        const body = await readJsonBody<{
+          restaurantId?: string;
+          paymentStatus?: 'pending' | 'paid';
+        }>(request);
+        const { restaurantId = DEFAULT_RESTAURANT_ID, paymentStatus } = body;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
+        if (paymentStatus !== 'paid' && paymentStatus !== 'pending') {
+          return Response.json({ error: 'حالة الدفع غير صالحة.' }, { status: 400 });
+        }
+        const updated = await updateOrderPaymentStatus(
+          env,
+          restaurantId,
+          decodeURIComponent(orderPaymentMatch[1]),
+          paymentStatus,
+          auth.email || 'المدير'
+        );
+        if (!updated) return Response.json({ error: 'الطلب غير موجود.' }, { status: 404 });
+        return Response.json({ order: updated });
+      } catch (err) {
+        console.error('Update order payment error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر تحديث حالة الدفع.' },
+          { status: 500 }
+        );
+      }
+    }
+
     if (method === 'GET' && pathname === '/api/admin/orders/export') {
       const denied = checkPermission(auth.role, 'orders', 'analytics');
       if (denied) return denied;
       try {
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
+        if (tenantDenied) return tenantDenied;
         const orders = await listOrders(env, restaurantId);
         const header = [
           'رقم الطلب',
@@ -1514,35 +1784,73 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
     }
 
     if (method === 'POST' && pathname === '/api/admin/password') {
-      const denied = checkPermission(auth.role, 'system');
-      if (denied) return denied;
-      const body = await readJsonBody<{ currentPassword?: string; newPassword?: string }>(request);
-      const currentOk = await verifyAdminPassword(env, String(body.currentPassword || ''));
-      if (!currentOk) {
-        return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
-      }
-      const nextPass = String(body.newPassword || '');
-      if (nextPass.length < 8 || !/[A-Z]/.test(nextPass) || !/\d/.test(nextPass)) {
-        return Response.json(
-          {
-            error:
-              'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.',
-          },
-          { status: 400 }
+      try {
+        const expectedOwnerEmail = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
+        const body = await readJsonBody<{ currentPassword?: string; newPassword?: string }>(request);
+        const nextPass = String(body.newPassword || '');
+        if (
+          nextPass.length < 8 ||
+          !/[A-Z]/.test(nextPass) ||
+          !/\d/.test(nextPass) ||
+          COMPROMISED_DEFAULT_PASSWORDS.has(nextPass)
+        ) {
+          return Response.json(
+            {
+              error:
+                'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم وألا تكون شائعة.',
+            },
+            { status: 400 }
+          );
+        }
+
+        if (auth.email.toLowerCase() === expectedOwnerEmail && auth.role === 'owner') {
+          const currentOk = await verifyAdminPassword(env, String(body.currentPassword || ''));
+          if (!currentOk) {
+            return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
+          }
+          await setAdminPassword(env, nextPass);
+          const freshToken = await signAdminToken(
+            secret,
+            auth.email,
+            auth.role,
+            auth.restaurantId,
+            false
+          );
+          return Response.json({ ok: true, token: freshToken, mustChangePassword: false });
+        }
+
+        const foundEmployee = await findEmployeeForLogin(env, auth.email, auth.restaurantId);
+        if (
+          !foundEmployee ||
+          !foundEmployee.passwordHash ||
+          !(await verifyPasswordAgainstHash(String(body.currentPassword || ''), foundEmployee.passwordHash))
+        ) {
+          return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
+        }
+        await updateEmployeePassword(env, auth.restaurantId, auth.email, nextPass);
+        const freshToken = await signAdminToken(
+          secret,
+          auth.email,
+          auth.role,
+          auth.restaurantId,
+          false
         );
+        return Response.json({ ok: true, token: freshToken, mustChangePassword: false });
+      } catch {
+        return Response.json({ error: 'تعذر تغيير كلمة المرور حالياً.' }, { status: 500 });
       }
-      await setAdminPassword(env, nextPass);
-      return Response.json({ ok: true });
     }
 
     if (method === 'POST' && pathname === '/api/admin/upload') {
+      const denied = checkPermission(auth.role, 'menu', 'settings');
+      if (denied) return denied;
       try {
         const body = await readJsonBody<{
           filename?: string;
           mimeType?: string;
           dataBase64?: string;
         }>(request);
-        const { filename = 'image.jpg', mimeType = 'image/jpeg', dataBase64 } = body;
+        const { mimeType = 'image/jpeg', dataBase64 } = body;
         if (!dataBase64 || typeof dataBase64 !== 'string') {
           return Response.json({ error: 'لم يتم إرسال ملف الصورة.' }, { status: 400 });
         }
@@ -1554,10 +1862,18 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
             { status: 400 }
           );
         }
+        const bytes = decodeBase64ToBytes(cleanBase64);
+        const detected = detectValidImageFromBytes(bytes, String(mimeType));
+        if (!detected) {
+          return Response.json(
+            { error: 'نوع الملف غير مدعوم. يُسمح فقط بصور JPG أو PNG أو WEBP أو GIF صالحة.' },
+            { status: 400 }
+          );
+        }
         const uploadedUrl = await uploadImageAsset(
           env,
-          String(filename),
-          String(mimeType),
+          `image.${detected.extension}`,
+          detected.mimeType,
           cleanBase64
         );
         return Response.json({ url: uploadedUrl });
@@ -1576,25 +1892,58 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
 
 export default {
   async fetch(request: Request, env: EdgeEnv): Promise<Response> {
+    const preflight = handleCorsPreflight(request, env.ALLOWED_ORIGINS);
+    if (preflight) return preflight;
+
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
       const res = await handleApiRequest(request, env);
-      const noStore =
+      const secured = applySecurityHeaders(res, request, env.ALLOWED_ORIGINS);
+      if (
         url.pathname.startsWith('/api/chat') ||
         url.pathname.startsWith('/api/orders') ||
-        url.pathname.startsWith('/api/admin');
-      return withSecurityHeaders(res, { noStore });
+        url.pathname.startsWith('/api/admin')
+      ) {
+        const headers = new Headers(secured.headers);
+        headers.set('Cache-Control', 'no-store');
+        return new Response(secured.body, {
+          status: secured.status,
+          statusText: secured.statusText,
+          headers,
+        });
+      }
+      return secured;
     }
 
     if (env.ASSETS) {
-      const assetRes = await env.ASSETS.fetch(request);
-      const contentType = assetRes.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
-        return withSecurityHeaders(assetRes, { isHtml: true });
+      let assetRes = await env.ASSETS.fetch(request);
+      if (
+        assetRes.status === 404 &&
+        !isStaticAssetPath(url.pathname) &&
+        isKnownSpaRoute(url.pathname)
+      ) {
+        const indexUrl = new URL('/index.html', request.url);
+        assetRes = await env.ASSETS.fetch(new Request(indexUrl.toString(), request));
       }
-      return assetRes;
+
+      const contentType = assetRes.headers.get('content-type') || '';
+      if (contentType.includes('text/html') || assetRes.status === 404) {
+        const secured = applySecurityHeaders(assetRes, request, env.ALLOWED_ORIGINS);
+        const headers = new Headers(secured.headers);
+        headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        return new Response(secured.body, {
+          status: secured.status,
+          statusText: secured.statusText,
+          headers,
+        });
+      }
+      return applySecurityHeaders(assetRes, request, env.ALLOWED_ORIGINS);
     }
 
-    return new Response('Static assets binding (ASSETS) is not configured.', { status: 500 });
+    return applySecurityHeaders(
+      new Response('Static assets binding (ASSETS) is not configured.', { status: 500 }),
+      request,
+      env.ALLOWED_ORIGINS
+    );
   },
 };

@@ -142,6 +142,7 @@ create index if not exists idx_orders_rest_number on public.orders (restaurant_i
 create index if not exists idx_orders_token on public.orders (order_token);
 create index if not exists idx_orders_rest_idempotency on public.orders (restaurant_id, idempotency_key);
 create index if not exists idx_orders_rest_created on public.orders (restaurant_id, created_at desc);
+create index if not exists idx_orders_rest_status_created on public.orders (restaurant_id, status, created_at desc);
 
 -- 9. جدول بنود الطلبات العلائقي (Order Items)
 create table if not exists public.order_items (
@@ -252,6 +253,7 @@ create index if not exists idx_activity_logs_rest_created on public.activity_log
 create index if not exists idx_notifications_rest_created on public.notifications (restaurant_id, created_at desc);
 create index if not exists idx_ai_logs_rest_ts on public.ai_logs (restaurant_id, timestamp desc);
 create index if not exists idx_customers_rest_phone on public.customers (restaurant_id, phone);
+create index if not exists idx_customers_rest_last_order on public.customers (restaurant_id, last_order_at desc);
 
 -- 15. دالة ذرية لزيادة عداد الكوبون بأمان
 create or replace function public.increment_coupon_usage(

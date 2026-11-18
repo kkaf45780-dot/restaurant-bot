@@ -15,6 +15,11 @@ import {
 } from './src/lib/permissions.ts';
 import { calculateOrderTotals } from './src/lib/pricing.ts';
 import { buildWhatsAppOrderUrl } from './src/lib/whatsapp.ts';
+import {
+  COMPROMISED_DEFAULT_PASSWORDS,
+  verifyPasswordAgainstHash,
+} from './worker/auth.ts';
+import { detectValidImageFromBytes } from './src/lib/uploadValidation.ts';
 import { runReceptionistChat } from './src/server/geminiReceptionist.ts';
 import {
   checkSlidingRateLimit,
@@ -41,7 +46,7 @@ import {
   deleteDeliveryZone,
   deleteEmployee,
   deleteMenuItem,
-  findEmployeeByEmail,
+  findEmployeeForLogin,
   findOrderByIdempotencyKey,
   findOrderByNumberOrId,
   findRestaurantBundle,
@@ -57,9 +62,12 @@ import {
   listNotifications,
   listOrders,
   markNotificationsRead,
+  probeBackendHealth,
   rateOrder,
   reorderMenuItems,
   setLocalAdminPassword,
+  updateEmployeePassword,
+  updateOrderPaymentStatus,
   updateOrderStatus,
   updateRestaurant,
   uploadImageAsset,
@@ -119,19 +127,38 @@ function getRequestClientIp(req: Request): string {
 interface AdminRequest extends Request {
   adminEmail?: string;
   adminRole?: EmployeeRole;
+  adminRestaurantId?: string;
+  adminMustChangePassword?: boolean;
+  adminAuthType?: 'local' | 'supabase';
 }
 
 const VALID_ROLES: EmployeeRole[] = ['owner', 'manager', 'cashier', 'kitchen'];
 
-function signLocalAdminToken(email: string, role: EmployeeRole = 'owner'): string {
+function signLocalAdminToken(
+  email: string,
+  role: EmployeeRole = 'owner',
+  restaurantId: string = DEFAULT_RESTAURANT_ID,
+  mustChangePassword = false
+): string {
   const payload = Buffer.from(
-    JSON.stringify({ email, role, exp: Date.now() + 1000 * 60 * 60 * 24 * 7 })
+    JSON.stringify({
+      email,
+      role,
+      restaurantId,
+      mustChangePassword,
+      exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
+    })
   ).toString('base64url');
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
   return `local.${payload}.${sig}`;
 }
 
-function verifyLocalAdminToken(token: string): { email: string; role: EmployeeRole } | null {
+function verifyLocalAdminToken(token: string): {
+  email: string;
+  role: EmployeeRole;
+  restaurantId: string;
+  mustChangePassword: boolean;
+} | null {
   if (!token.startsWith('local.')) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
@@ -145,15 +172,45 @@ function verifyLocalAdminToken(token: string): { email: string; role: EmployeeRo
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
       email: string;
       role?: EmployeeRole;
+      restaurantId?: string;
+      mustChangePassword?: boolean;
       exp: number;
     };
     if (decoded.exp < Date.now()) return null;
     const role: EmployeeRole =
       decoded.role && VALID_ROLES.includes(decoded.role) ? decoded.role : 'owner';
-    return { email: decoded.email, role };
+    return {
+      email: decoded.email,
+      role,
+      restaurantId: String(decoded.restaurantId || DEFAULT_RESTAURANT_ID),
+      mustChangePassword: Boolean(decoded.mustChangePassword),
+    };
   } catch {
     return null;
   }
+}
+
+function resolveTargetRestaurantId(req: Request): string {
+  const fromQuery = typeof req.query.restaurantId === 'string' ? req.query.restaurantId : '';
+  const fromBody =
+    req.body && typeof req.body === 'object' && typeof req.body.restaurantId === 'string'
+      ? req.body.restaurantId
+      : '';
+  return (fromQuery || fromBody || DEFAULT_RESTAURANT_ID).trim() || DEFAULT_RESTAURANT_ID;
+}
+
+function authorizeRestaurantAccess(
+  req: Request,
+  res: Response,
+  targetRestaurantId: string
+): boolean {
+  const adminReq = req as AdminRequest;
+  const authorizedTenant = adminReq.adminRestaurantId || DEFAULT_RESTAURANT_ID;
+  if (authorizedTenant !== targetRestaurantId) {
+    res.status(403).json({ error: 'غير مصرح لك بالوصول إلى بيانات هذا المطعم.' });
+    return false;
+  }
+  return true;
 }
 
 async function verifyAdminRequest(
@@ -169,6 +226,7 @@ async function verifyAdminRequest(
     return;
   }
 
+  const targetRestaurantId = resolveTargetRestaurantId(req);
   const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
   const supabaseKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
@@ -182,16 +240,19 @@ async function verifyAdminRequest(
         const access = await verifySupabaseAdminAccess(
           data.user.id,
           userEmail,
-          DEFAULT_RESTAURANT_ID
+          targetRestaurantId
         );
         if (!access.allowed) {
           res.status(403).json({
-            error: 'هذا الحساب غير مصرح له بإدارة لوحة التحكم.',
+            error: 'هذا الحساب غير مصرح له بإدارة هذا المطعم.',
           });
           return;
         }
         (req as AdminRequest).adminEmail = userEmail || 'admin';
         (req as AdminRequest).adminRole = access.role ?? 'owner';
+        (req as AdminRequest).adminRestaurantId = targetRestaurantId;
+        (req as AdminRequest).adminMustChangePassword = false;
+        (req as AdminRequest).adminAuthType = 'supabase';
         next();
         return;
       }
@@ -202,8 +263,22 @@ async function verifyAdminRequest(
 
   const localAdmin = verifyLocalAdminToken(token);
   if (localAdmin) {
+    if (
+      localAdmin.mustChangePassword &&
+      req.path !== '/api/admin/me' &&
+      req.path !== '/api/admin/password'
+    ) {
+      res.status(403).json({
+        error: 'يجب تغيير كلمة المرور المؤقتة قبل استخدام لوحة التحكم.',
+        mustChangePassword: true,
+      });
+      return;
+    }
     (req as AdminRequest).adminEmail = localAdmin.email;
     (req as AdminRequest).adminRole = localAdmin.role;
+    (req as AdminRequest).adminRestaurantId = localAdmin.restaurantId;
+    (req as AdminRequest).adminMustChangePassword = localAdmin.mustChangePassword;
+    (req as AdminRequest).adminAuthType = 'local';
     next();
     return;
   }
@@ -276,8 +351,13 @@ async function startServer(): Promise<void> {
   }
   app.use('/uploads', express.static(UPLOADS_DIR));
 
-  app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'moazzaf-almatam' });
+  app.get('/api/health', async (_req, res) => {
+    const health = await probeBackendHealth();
+    res.status(health.ok ? 200 : 503).json({
+      service: 'moazzaf-almatam',
+      runtime: 'node-express',
+      ...health,
+    });
   });
 
   app.get('/api/config/status', (_req, res) => {
@@ -312,6 +392,14 @@ async function startServer(): Promise<void> {
   // Public Coupon Validation
   app.post('/api/coupons/validate', async (req, res) => {
     try {
+      const clientIp = getRequestClientIp(req);
+      const ipHash = await hashIpForLog(clientIp);
+      const rl = await checkSlidingRateLimit(`coupon:${ipHash}`, 20, 60);
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', String(rl.retryAfterSeconds));
+        res.status(429).json({ error: 'تم إرسال محاولات كثيرة، يُرجى الانتظار دقيقة.' });
+        return;
+      }
       const {
         restaurantId = DEFAULT_RESTAURANT_ID,
         code,
@@ -363,6 +451,14 @@ async function startServer(): Promise<void> {
   app.get('/api/orders/track', async (req, res) => {
     try {
       res.setHeader('Cache-Control', 'no-store');
+      const clientIp = getRequestClientIp(req);
+      const ipHash = await hashIpForLog(clientIp);
+      const rl = await checkSlidingRateLimit(`track:${ipHash}`, 30, 60);
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', String(rl.retryAfterSeconds));
+        res.status(429).json({ error: 'تم إرسال طلبات تتبع كثيرة، يُرجى الانتظار دقيقة.' });
+        return;
+      }
       const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
       const orderNumber = String(req.query.orderNumber || '').trim();
       const token = String(req.query.token || '').trim();
@@ -538,6 +634,11 @@ async function startServer(): Promise<void> {
         return;
       }
 
+      if (message.trim().length > 1000) {
+        res.status(400).json({ error: 'الرسالة طويلة جداً (الحد الأقصى ١٠٠٠ حرف).' });
+        return;
+      }
+
       // Reject forged / bypass human verification tokens unconditionally
       if (
         humanVerified === true ||
@@ -616,10 +717,17 @@ async function startServer(): Promise<void> {
         return;
       }
 
+      const safeHistory = Array.isArray(history)
+        ? history
+            .slice(-10)
+            .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.text === 'string')
+            .map((h) => ({ role: h.role as 'user' | 'assistant', text: h.text.slice(0, 1000) }))
+        : [];
+
       const result = await runReceptionistChat({
         bundle,
         userMessage: message.trim(),
-        history: Array.isArray(history) ? history : [],
+        history: safeHistory,
         currentDraft: {
           fulfillmentType: 'delivery',
           ...orderDraft,
@@ -639,6 +747,14 @@ async function startServer(): Promise<void> {
   app.post('/api/orders', async (req, res) => {
     try {
       res.setHeader('Cache-Control', 'no-store');
+      const clientIp = getRequestClientIp(req);
+      const ipHash = await hashIpForLog(clientIp);
+      const orderRl = await checkSlidingRateLimit(`order:${ipHash}`, 15, 60);
+      if (!orderRl.allowed) {
+        res.setHeader('Retry-After', String(orderRl.retryAfterSeconds));
+        res.status(429).json({ error: 'تم إرسال طلبات كثيرة في وقت قصير، يُرجى الانتظار دقيقة.' });
+        return;
+      }
       const {
         restaurantId = DEFAULT_RESTAURANT_ID,
         items = [],
@@ -843,26 +959,58 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      const { email, password } = req.body ?? {};
+      const { email, password, restaurantId } = req.body ?? {};
       const cleanEmail = String(email || '').trim().toLowerCase();
       const cleanPass = String(password || '');
+      const requestedRestaurantId =
+        typeof restaurantId === 'string' && restaurantId.trim() ? restaurantId.trim() : undefined;
       const expectedEmail = (process.env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-      const isPasswordValid = await verifyLocalAdminPassword(cleanPass);
 
-      if (cleanEmail === expectedEmail && isPasswordValid) {
-        const role: EmployeeRole = 'owner';
-        const token = signLocalAdminToken(expectedEmail, role);
-        res.json({ token, email: expectedEmail, role, permissions: ROLE_PERMISSIONS[role] });
+      if (!cleanEmail || !cleanPass || COMPROMISED_DEFAULT_PASSWORDS.has(cleanPass)) {
+        res.status(401).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.' });
         return;
       }
 
-      const employee = await findEmployeeByEmail(DEFAULT_RESTAURANT_ID, cleanEmail);
-      if (employee && isPasswordValid) {
-        const token = signLocalAdminToken(employee.email, employee.role);
+      if (cleanEmail === expectedEmail) {
+        const ownerValid = await verifyLocalAdminPassword(cleanPass);
+        if (ownerValid) {
+          const role: EmployeeRole = 'owner';
+          const tenantId = requestedRestaurantId || DEFAULT_RESTAURANT_ID;
+          const token = signLocalAdminToken(expectedEmail, role, tenantId, false);
+          res.json({
+            token,
+            email: expectedEmail,
+            role,
+            restaurantId: tenantId,
+            mustChangePassword: false,
+            permissions: ROLE_PERMISSIONS[role],
+          });
+          return;
+        }
+        res.status(401).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.' });
+        return;
+      }
+
+      const foundEmployee = await findEmployeeForLogin(cleanEmail, requestedRestaurantId);
+      if (
+        foundEmployee &&
+        foundEmployee.passwordHash &&
+        (await verifyPasswordAgainstHash(cleanPass, foundEmployee.passwordHash))
+      ) {
+        const { employee } = foundEmployee;
+        const mustChangePassword = Boolean(employee.mustChangePassword);
+        const token = signLocalAdminToken(
+          employee.email,
+          employee.role,
+          employee.restaurantId,
+          mustChangePassword
+        );
         res.json({
           token,
           email: employee.email,
           role: employee.role,
+          restaurantId: employee.restaurantId,
+          mustChangePassword,
           permissions: ROLE_PERMISSIONS[employee.role],
         });
         return;
@@ -881,13 +1029,16 @@ async function startServer(): Promise<void> {
       authenticated: true,
       email: adminReq.adminEmail,
       role,
+      restaurantId: adminReq.adminRestaurantId || DEFAULT_RESTAURANT_ID,
+      mustChangePassword: Boolean(adminReq.adminMustChangePassword),
       permissions: ROLE_PERMISSIONS[role],
     });
   });
 
   app.get('/api/admin/overview', verifyAdminRequest, async (req, res) => {
     try {
-      const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+      const restaurantId = resolveTargetRestaurantId(req);
+      if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
       const [
         bundle,
         orders,
@@ -936,6 +1087,8 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const { restaurantId = DEFAULT_RESTAURANT_ID, ...patch } = req.body ?? {};
+        const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         if (
           patch?.aiSettings?.model &&
           !(ALLOWED_AI_MODELS as readonly string[]).includes(String(patch.aiSettings.model))
@@ -943,11 +1096,11 @@ async function startServer(): Promise<void> {
           res.status(400).json({ error: 'نموذج الذكاء الاصطناعي المختار غير مسموح به.' });
           return;
         }
-        const updated = await updateRestaurant(restaurantId, patch);
+        const updated = await updateRestaurant(targetId, patch);
         const hoursStatus = evaluateRestaurantHours(updated);
         await appendActivityLog({
           id: `act_${Date.now()}`,
-          restaurantId,
+          restaurantId: targetId,
           actorName: (req as AdminRequest).adminEmail || 'المدير',
           action: 'تحديث إعدادات المطعم',
           details: 'تم تعديل معلومات المطعم أو المواعيد أو إعدادات المساعد الذكي.',
@@ -968,6 +1121,8 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const body = req.body ?? {};
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         const cat: MenuCategory = {
           id: body.id || `cat_${Date.now()}`,
           restaurantId: body.restaurantId || DEFAULT_RESTAURANT_ID,
@@ -996,8 +1151,9 @@ async function startServer(): Promise<void> {
     requirePermission('menu'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
-        await deleteCategory(restaurantId, req.params.id);
+        const targetId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
+        await deleteCategory(targetId, req.params.id);
         res.json({ ok: true });
       } catch (err) {
         console.error('Delete category error:', err);
@@ -1015,6 +1171,8 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const body = req.body ?? {};
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         const price = Number(body.price);
         if (!String(body.name || '').trim() || !Number.isFinite(price) || price < 0) {
           res.status(400).json({ error: 'يُرجى إدخال اسم الصنف وسعر صحيح.' });
@@ -1022,7 +1180,7 @@ async function startServer(): Promise<void> {
         }
         const item: MenuItem = {
           id: body.id || `item_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-          restaurantId: body.restaurantId || DEFAULT_RESTAURANT_ID,
+          restaurantId: targetId,
           categoryId: String(body.categoryId),
           name: String(body.name).trim(),
           description: String(body.description || '').trim(),
@@ -1054,11 +1212,13 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const { restaurantId = DEFAULT_RESTAURANT_ID, orderedIds = [] } = req.body ?? {};
+        const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         if (!Array.isArray(orderedIds)) {
           res.status(400).json({ error: 'بيانات الترتيب غير صالحة.' });
           return;
         }
-        await reorderMenuItems(restaurantId, orderedIds);
+        await reorderMenuItems(targetId, orderedIds);
         res.json({ ok: true });
       } catch (err) {
         console.error('Reorder items error:', err);
@@ -1075,7 +1235,8 @@ async function startServer(): Promise<void> {
     requirePermission('menu'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         await deleteMenuItem(restaurantId, req.params.id);
         res.json({ ok: true });
       } catch (err) {
@@ -1099,13 +1260,15 @@ async function startServer(): Promise<void> {
         delta,
         reason = 'تعديل مخزون يدوي',
       } = req.body ?? {};
+      const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
+      if (!authorizeRestaurantAccess(req, res, targetId)) return;
       const numDelta = Math.trunc(Number(delta));
       if (!itemId || !Number.isFinite(numDelta) || numDelta === 0) {
         res.status(400).json({ error: 'يُرجى تحديد الصنف وكمية التعديل.' });
         return;
       }
       const updated = await adjustItemStock({
-        restaurantId,
+        restaurantId: targetId,
         itemId: String(itemId),
         delta: numDelta,
         reason: String(reason).trim() || 'تعديل مخزون يدوي',
@@ -1127,6 +1290,8 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const body = req.body ?? {};
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         const fee = Number(body.fee);
         const minOrderAmount = Math.max(0, Number(body.minOrderAmount ?? 0));
         if (!String(body.name || '').trim() || !Number.isFinite(fee) || fee < 0) {
@@ -1135,7 +1300,7 @@ async function startServer(): Promise<void> {
         }
         const zone: DeliveryZone = {
           id: body.id || `zone_${Date.now()}`,
-          restaurantId: body.restaurantId || DEFAULT_RESTAURANT_ID,
+          restaurantId: targetId,
           name: String(body.name).trim(),
           fee,
           minOrderAmount,
@@ -1156,7 +1321,8 @@ async function startServer(): Promise<void> {
     requirePermission('delivery'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         await deleteDeliveryZone(restaurantId, req.params.id);
         res.json({ ok: true });
       } catch {
@@ -1172,13 +1338,15 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const body = req.body ?? {};
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         if (!String(body.name || '').trim()) {
           res.status(400).json({ error: 'يُرجى إدخال اسم الفرع.' });
           return;
         }
         const branch: RestaurantBranch = {
           id: body.id || `br_${Date.now()}`,
-          restaurantId: body.restaurantId || DEFAULT_RESTAURANT_ID,
+          restaurantId: targetId,
           name: String(body.name).trim(),
           address: String(body.address || '').trim(),
           phone: String(body.phone || '').trim(),
@@ -1199,7 +1367,8 @@ async function startServer(): Promise<void> {
     requirePermission('delivery'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         await deleteBranch(restaurantId, req.params.id);
         res.json({ ok: true });
       } catch {
@@ -1215,6 +1384,8 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const body = req.body ?? {};
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         const val = Number(body.discountValue);
         if (!String(body.code || '').trim() || !Number.isFinite(val) || val <= 0) {
           res.status(400).json({ error: 'يُرجى إدخال كود الخصم وقيمة خصم صحيحة.' });
@@ -1222,7 +1393,7 @@ async function startServer(): Promise<void> {
         }
         const coupon: Coupon = {
           id: body.id || `cpn_${Date.now()}`,
-          restaurantId: body.restaurantId || DEFAULT_RESTAURANT_ID,
+          restaurantId: targetId,
           code: String(body.code).trim().toUpperCase(),
           description: String(body.description || '').trim(),
           discountType: body.discountType === 'fixed' ? 'fixed' : 'percentage',
@@ -1253,7 +1424,8 @@ async function startServer(): Promise<void> {
     requirePermission('coupons'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         await deleteCoupon(restaurantId, req.params.id);
         res.json({ ok: true });
       } catch {
@@ -1269,21 +1441,42 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const body = req.body ?? {};
+        const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         if (!String(body.name || '').trim() || !String(body.email || '').trim()) {
           res.status(400).json({ error: 'اسم الموظف والبريد الإلكتروني مطلوبان.' });
           return;
         }
-        const employee: Employee = {
+        const rawPassword = typeof body.password === 'string' ? body.password.trim() : '';
+        if (rawPassword) {
+          if (
+            COMPROMISED_DEFAULT_PASSWORDS.has(rawPassword) ||
+            rawPassword.length < 8
+          ) {
+            res.status(400).json({
+              error: 'كلمة مرور الموظف يجب أن تكون 8 أحرف على الأقل وألا تكون كلمة شائعة.',
+            });
+            return;
+          }
+        }
+        const employee: Employee & { password?: string } = {
           id: body.id || `emp_${Date.now()}`,
-          restaurantId: body.restaurantId || DEFAULT_RESTAURANT_ID,
+          restaurantId: targetId,
           name: String(body.name).trim(),
-          email: String(body.email).trim(),
+          email: String(body.email).trim().toLowerCase(),
           phone: String(body.phone || '').trim(),
           role: ['owner', 'manager', 'cashier', 'kitchen'].includes(body.role)
             ? body.role
             : 'cashier',
           isActive: body.isActive !== false,
+          mustChangePassword:
+            rawPassword
+              ? body.mustChangePassword !== undefined
+                ? Boolean(body.mustChangePassword)
+                : true
+              : body.mustChangePassword,
           createdAt: body.createdAt || new Date().toISOString(),
+          ...(rawPassword ? { password: rawPassword } : {}),
         };
         const saved = await upsertEmployee(employee);
         res.json({ employee: saved });
@@ -1299,7 +1492,8 @@ async function startServer(): Promise<void> {
     requirePermission('employees'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         await deleteEmployee(restaurantId, req.params.id);
         res.json({ ok: true });
       } catch {
@@ -1310,7 +1504,8 @@ async function startServer(): Promise<void> {
 
   app.post('/api/admin/notifications/read', verifyAdminRequest, async (req, res) => {
     try {
-      const restaurantId = String(req.body?.restaurantId || DEFAULT_RESTAURANT_ID);
+      const restaurantId = resolveTargetRestaurantId(req);
+      if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
       await markNotificationsRead(restaurantId);
       res.json({ ok: true });
     } catch {
@@ -1325,6 +1520,8 @@ async function startServer(): Promise<void> {
     async (req, res) => {
       try {
         const { restaurantId = DEFAULT_RESTAURANT_ID, status } = req.body ?? {};
+        const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
         const validStatuses: OrderStatus[] = [
           'received',
           'under_review',
@@ -1339,7 +1536,7 @@ async function startServer(): Promise<void> {
           return;
         }
         const actor = (req as AdminRequest).adminEmail || 'المدير';
-        const updated = await updateOrderStatus(restaurantId, req.params.id, status, actor);
+        const updated = await updateOrderStatus(targetId, req.params.id, status, actor);
         if (!updated) {
           res.status(404).json({ error: 'الطلب غير موجود.' });
           return;
@@ -1354,13 +1551,43 @@ async function startServer(): Promise<void> {
     }
   );
 
+  app.patch(
+    '/api/admin/orders/:id/payment',
+    verifyAdminRequest,
+    requirePermission('orders'),
+    async (req, res) => {
+      try {
+        const { restaurantId = DEFAULT_RESTAURANT_ID, paymentStatus } = req.body ?? {};
+        const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
+        if (!authorizeRestaurantAccess(req, res, targetId)) return;
+        if (paymentStatus !== 'paid' && paymentStatus !== 'pending') {
+          res.status(400).json({ error: 'حالة الدفع غير صالحة.' });
+          return;
+        }
+        const actor = (req as AdminRequest).adminEmail || 'المدير';
+        const updated = await updateOrderPaymentStatus(targetId, req.params.id, paymentStatus, actor);
+        if (!updated) {
+          res.status(404).json({ error: 'الطلب غير موجود.' });
+          return;
+        }
+        res.json({ order: updated });
+      } catch (err) {
+        console.error('Update order payment error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر تحديث حالة الدفع.',
+        });
+      }
+    }
+  );
+
   app.get(
     '/api/admin/orders/export',
     verifyAdminRequest,
     requirePermission('orders', 'analytics'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         const orders = await listOrders(restaurantId);
         const header = [
           'رقم الطلب',
@@ -1411,7 +1638,8 @@ async function startServer(): Promise<void> {
     requirePermission('orders'),
     async (req, res) => {
       try {
-        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const restaurantId = resolveTargetRestaurantId(req);
+        if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
         const order = await findOrderByNumberOrId(restaurantId, req.params.id);
         if (!order) {
           res.status(404).json({ error: 'الطلب غير موجود.' });
@@ -1425,50 +1653,93 @@ async function startServer(): Promise<void> {
     }
   );
 
-  app.post(
-    '/api/admin/password',
-    verifyAdminRequest,
-    requirePermission('system'),
-    async (req, res) => {
+  app.post('/api/admin/password', verifyAdminRequest, async (req, res) => {
+    try {
+      const adminReq = req as AdminRequest;
+      const actorEmail = (adminReq.adminEmail || '').toLowerCase();
+      const actorRole: EmployeeRole = adminReq.adminRole || 'owner';
+      const actorRestaurantId = adminReq.adminRestaurantId || DEFAULT_RESTAURANT_ID;
+      const expectedOwnerEmail = (process.env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
+
       const { currentPassword, newPassword } = req.body ?? {};
-      if (!(await verifyLocalAdminPassword(String(currentPassword || '')))) {
-        res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
-        return;
-      }
       const nextPass = String(newPassword || '');
-      if (nextPass.length < 8 || !/[A-Z]/.test(nextPass) || !/\d/.test(nextPass)) {
+      if (
+        nextPass.length < 8 ||
+        !/[A-Z]/.test(nextPass) ||
+        !/\d/.test(nextPass) ||
+        COMPROMISED_DEFAULT_PASSWORDS.has(nextPass)
+      ) {
         res.status(400).json({
-          error: 'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم واحد على الأقل.',
+          error:
+            'كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف كبير ورقم وألا تكون شائعة.',
         });
         return;
       }
-      await setLocalAdminPassword(nextPass);
-      res.json({ ok: true });
-    }
-  );
 
-  app.post('/api/admin/upload', verifyAdminRequest, async (req, res) => {
-    try {
-      const { filename = 'image.jpg', mimeType = 'image/jpeg', dataBase64 } = req.body ?? {};
-      if (!dataBase64 || typeof dataBase64 !== 'string') {
-        res.status(400).json({ error: 'لم يتم إرسال ملف الصورة.' });
+      if (actorEmail === expectedOwnerEmail && actorRole === 'owner') {
+        if (!(await verifyLocalAdminPassword(String(currentPassword || '')))) {
+          res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
+          return;
+        }
+        await setLocalAdminPassword(nextPass);
+        const token = signLocalAdminToken(actorEmail, actorRole, actorRestaurantId, false);
+        res.json({ ok: true, token, mustChangePassword: false });
         return;
       }
-      const cleanBase64 = dataBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
-      const buffer = Buffer.from(cleanBase64, 'base64');
-      if (buffer.length > 5 * 1024 * 1024) {
-        res.status(400).json({ error: 'حجم الصورة كبير جداً (الحد الأقصى 5 ميجابايت).' });
+
+      const foundEmployee = await findEmployeeForLogin(actorEmail, actorRestaurantId);
+      if (
+        !foundEmployee ||
+        !foundEmployee.passwordHash ||
+        !(await verifyPasswordAgainstHash(String(currentPassword || ''), foundEmployee.passwordHash))
+      ) {
+        res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
         return;
       }
-      const url = await uploadImageAsset(String(filename), String(mimeType), buffer);
-      res.json({ url });
-    } catch (err) {
-      console.error('Upload image error:', err);
-      res.status(500).json({
-        error: err instanceof Error ? err.message : 'تعذر رفع الصورة حالياً.',
-      });
+      await updateEmployeePassword(actorRestaurantId, actorEmail, nextPass);
+      const token = signLocalAdminToken(actorEmail, actorRole, actorRestaurantId, false);
+      res.json({ ok: true, token, mustChangePassword: false });
+    } catch {
+      res.status(500).json({ error: 'تعذر تغيير كلمة المرور حالياً.' });
     }
   });
+
+  app.post(
+    '/api/admin/upload',
+    verifyAdminRequest,
+    requirePermission('menu', 'settings'),
+    async (req, res) => {
+      try {
+        const { filename = 'image.jpg', mimeType = 'image/jpeg', dataBase64 } = req.body ?? {};
+        if (!dataBase64 || typeof dataBase64 !== 'string') {
+          res.status(400).json({ error: 'لم يتم إرسال ملف الصورة.' });
+          return;
+        }
+        const cleanBase64 = dataBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        if (buffer.length > 5 * 1024 * 1024) {
+          res.status(400).json({ error: 'حجم الصورة كبير جداً (الحد الأقصى 5 ميجابايت).' });
+          return;
+        }
+        const detected = detectValidImageFromBytes(buffer, String(mimeType));
+        if (!detected) {
+          res.status(400).json({
+            error: 'نوع الملف غير مدعوم. يُسمح فقط بصور JPG أو PNG أو WEBP أو GIF صالحة.',
+          });
+          return;
+        }
+        const safeFilename = `image.${detected.extension}`;
+        void filename;
+        const url = await uploadImageAsset(safeFilename, detected.mimeType, buffer);
+        res.json({ url });
+      } catch (err) {
+        console.error('Upload image error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر رفع الصورة حالياً.',
+        });
+      }
+    }
+  );
 
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
