@@ -11,7 +11,11 @@
     "run_worker_first": true
   },
   "vars": {
-    "APP_VERSION": "2.0.0"
+    "APP_VERSION": "2.0.0",
+    "SUPABASE_URL": "https://xzrhqkaippwoqakjnxaj.supabase.co",
+    "VITE_SUPABASE_URL": "https://xzrhqkaippwoqakjnxaj.supabase.co",
+    "SUPABASE_ANON_KEY": "sb_publishable_tDNRf_-iCZvDtmYypg9TdQ_f_3OgLtM",
+    "VITE_SUPABASE_ANON_KEY": "sb_publishable_tDNRf_-iCZvDtmYypg9TdQ_f_3OgLtM"
   }
   // Bind Cloudflare KV for distributed rate-limiting & state:
   // npx wrangler kv namespace create RATE_LIMIT_KV
