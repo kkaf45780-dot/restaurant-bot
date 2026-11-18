@@ -9,7 +9,9 @@ import {
   findOrderByTokenSupabase,
   incrementCouponUsageSupabase,
   insertOrderItemsSupabase,
+  insertOrderNotificationSupabase,
   isProductionSupabaseRequired,
+  upsertCustomerForOrderSupabase,
 } from '../../worker/db/supabase.ts';
 import {
   DEFAULT_RESTAURANT_ID,
@@ -34,8 +36,10 @@ import type {
   AdminNotification,
   AILogEntry,
   Coupon,
+  Customer,
   DeliveryZone,
   Employee,
+  EmployeeRole,
   InventoryMovement,
   MenuCategory,
   MenuItem,
@@ -84,6 +88,7 @@ interface EdgeDatabaseSchema {
   branches: RestaurantBranch[];
   coupons: Coupon[];
   orders: Order[];
+  customers: Customer[];
   inventoryMovements: InventoryMovement[];
   employees: Employee[];
   activityLogs: ActivityLog[];
@@ -104,6 +109,7 @@ function getInitialDb(): EdgeDatabaseSchema {
     branches: structuredClone(INITIAL_BRANCHES),
     coupons: structuredClone(INITIAL_COUPONS),
     orders: structuredClone(INITIAL_ORDERS),
+    customers: [],
     inventoryMovements: structuredClone(INITIAL_INVENTORY_MOVEMENTS),
     employees: structuredClone(INITIAL_EMPLOYEES),
     activityLogs: structuredClone(INITIAL_ACTIVITY_LOGS),
@@ -149,6 +155,7 @@ async function readEdgeDb(env: EdgeEnv): Promise<EdgeDatabaseSchema> {
           branches: stored.branches?.length ? stored.branches : seed.branches,
           coupons: stored.coupons ?? seed.coupons,
           orders: ordersWithTokens,
+          customers: Array.isArray(stored.customers) ? stored.customers : [],
           inventoryMovements: stored.inventoryMovements ?? seed.inventoryMovements,
           employees: cleanedEmployees,
           activityLogs: stored.activityLogs ?? seed.activityLogs,
@@ -216,6 +223,25 @@ function mapSupabaseRestaurant(row: Record<string, unknown>): Restaurant {
   };
 }
 
+function mapSupabaseMenuItem(i: Record<string, unknown>): MenuItem {
+  return {
+    id: String(i.id),
+    restaurantId: String(i.restaurant_id),
+    categoryId: String(i.category_id),
+    name: String(i.name),
+    description: String(i.description ?? ''),
+    price: Number(i.price ?? 0),
+    imageUrl: String(i.image_url ?? ''),
+    isAvailable: Boolean(i.is_available),
+    isPopular: Boolean(i.is_popular),
+    stockQuantity: Number(i.stock_quantity ?? 50),
+    lowStockThreshold: Number(i.low_stock_threshold ?? 8),
+    sizes: Array.isArray(i.sizes) ? (i.sizes as MenuItem['sizes']) : [],
+    extras: Array.isArray(i.extras) ? (i.extras as MenuItem['extras']) : [],
+    sortOrder: Number(i.sort_order ?? 0),
+  };
+}
+
 function mapSupabaseOrder(row: Record<string, unknown>): Order {
   const status = normalizeLegacyOrderStatus(String(row.status ?? 'received'));
   return {
@@ -257,6 +283,47 @@ function mapSupabaseOrder(row: Record<string, unknown>): Order {
   };
 }
 
+export async function verifySupabaseAdminAccess(
+  env: EdgeEnv,
+  userId: string,
+  email: string,
+  restaurantId: string = DEFAULT_RESTAURANT_ID
+): Promise<{ allowed: boolean; role?: EmployeeRole }> {
+  const supabase = getSupabaseAdminClient(env);
+  const cleanEmail = email.trim().toLowerCase();
+  if (!supabase || !cleanEmail) return { allowed: false };
+
+  const { data: adminRow, error: adminErr } = await supabase
+    .from('restaurant_admins')
+    .select('role')
+    .eq('restaurant_id', restaurantId)
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (!adminErr && adminRow) {
+    const r = String(adminRow.role || 'owner') as EmployeeRole;
+    return { allowed: true, role: r };
+  }
+
+  const configuredOwnerEmail = env.ADMIN_EMAIL?.trim().toLowerCase();
+  if (configuredOwnerEmail && cleanEmail === configuredOwnerEmail) {
+    return { allowed: true, role: 'owner' };
+  }
+
+  const { data: empRow, error: empErr } = await supabase
+    .from('employees')
+    .select('role, is_active')
+    .eq('restaurant_id', restaurantId)
+    .ilike('email', cleanEmail)
+    .maybeSingle();
+
+  if (!empErr && empRow && empRow.is_active !== false) {
+    return { allowed: true, role: String(empRow.role || 'cashier') as EmployeeRole };
+  }
+
+  return { allowed: false };
+}
+
 export async function findRestaurantBundle(
   env: EdgeEnv,
   restaurantId: string = DEFAULT_RESTAURANT_ID
@@ -267,104 +334,100 @@ export async function findRestaurantBundle(
 
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
-    try {
-      const { data: restRow, error: restErr } = await supabase
-        .from('restaurants')
-        .select('*')
-        .or(`id.eq.${restaurantId},slug.eq.${restaurantId}`)
-        .maybeSingle();
+    const { data: restRow, error: restErr } = await supabase
+      .from('restaurants')
+      .select('*')
+      .or(`id.eq.${restaurantId},slug.eq.${restaurantId}`)
+      .maybeSingle();
 
-      if (!restErr && restRow) {
-        const targetId = String(restRow.id);
-        const [{ data: cats }, { data: items }, { data: zones }, { data: branches }, { data: coupons }] =
-          await Promise.all([
-            supabase
-              .from('menu_categories')
-              .select('*')
-              .eq('restaurant_id', targetId)
-              .order('sort_order', { ascending: true }),
-            supabase
-              .from('menu_items')
-              .select('*')
-              .eq('restaurant_id', targetId)
-              .order('sort_order', { ascending: true }),
-            supabase.from('delivery_zones').select('*').eq('restaurant_id', targetId),
-            supabase.from('branches').select('*').eq('restaurant_id', targetId),
-            supabase
-              .from('coupons')
-              .select('*')
-              .eq('restaurant_id', targetId)
-              .eq('is_active', true),
-          ]);
+    if (restErr) {
+      throw new Error(`تعذر قراءة بيانات المطعم من قاعدة البيانات: ${restErr.message}`);
+    }
 
-        const bundle: RestaurantBundle = {
-          restaurant: mapSupabaseRestaurant(restRow),
-          categories: (cats ?? []).map((c) => ({
-            id: c.id,
-            restaurantId: c.restaurant_id,
-            name: c.name,
-            description: c.description ?? '',
-            sortOrder: Number(c.sort_order ?? 0),
-          })),
-          items: (items ?? []).map((i) => ({
-            id: i.id,
-            restaurantId: i.restaurant_id,
-            categoryId: i.category_id,
-            name: i.name,
-            description: i.description ?? '',
-            price: Number(i.price ?? 0),
-            imageUrl: i.image_url ?? '',
-            isAvailable: Boolean(i.is_available),
-            isPopular: Boolean(i.is_popular),
-            stockQuantity: Number(i.stock_quantity ?? 50),
-            lowStockThreshold: Number(i.low_stock_threshold ?? 8),
-            sizes: Array.isArray(i.sizes) ? i.sizes : [],
-            extras: Array.isArray(i.extras) ? i.extras : [],
-            sortOrder: Number(i.sort_order ?? 0),
-          })),
-          deliveryZones: (zones ?? []).map((z) => ({
-            id: z.id,
-            restaurantId: z.restaurant_id,
-            name: z.name,
-            fee: Number(z.fee ?? 0),
-            minOrderAmount: Number(z.min_order_amount ?? 0),
-            estimatedMinutes: z.estimated_minutes ?? '٣٠ - ٤٥ دقيقة',
-            isActive: Boolean(z.is_active),
-          })),
-          branches: (branches ?? []).map((b) => ({
-            id: b.id,
-            restaurantId: b.restaurant_id,
-            name: b.name,
-            address: b.address ?? '',
-            phone: b.phone ?? '',
-            hoursText: b.hours_text ?? '',
-            isOpen: Boolean(b.is_open),
-          })),
-          activeCoupons: (coupons ?? []).map((cp) => ({
-            id: cp.id,
-            restaurantId: cp.restaurant_id,
-            code: cp.code,
-            description: cp.description ?? '',
-            discountType: cp.discount_type,
-            discountValue: Number(cp.discount_value ?? 0),
-            minOrderAmount: Number(cp.min_order_amount ?? 0),
-            maxDiscountAmount: cp.max_discount_amount ? Number(cp.max_discount_amount) : undefined,
-            validFrom: cp.valid_from ?? '',
-            validUntil: cp.valid_until ?? '',
-            usageLimit: Number(cp.usage_limit ?? 0),
-            usedCount: Number(cp.used_count ?? 0),
-            isActive: Boolean(cp.is_active),
-            applicableCategoryIds: cp.applicable_category_ids ?? [],
-            applicableItemIds: cp.applicable_item_ids ?? [],
-          })),
-        };
-        return resolveExactRestaurantBundle(bundle, restaurantId);
+    if (restRow) {
+      const targetId = String(restRow.id);
+      const [
+        { data: cats, error: catsErr },
+        { data: items, error: itemsErr },
+        { data: zones, error: zonesErr },
+        { data: branches, error: branchesErr },
+        { data: coupons, error: couponsErr },
+      ] = await Promise.all([
+        supabase
+          .from('menu_categories')
+          .select('*')
+          .eq('restaurant_id', targetId)
+          .order('sort_order', { ascending: true }),
+        supabase
+          .from('menu_items')
+          .select('*')
+          .eq('restaurant_id', targetId)
+          .order('sort_order', { ascending: true }),
+        supabase.from('delivery_zones').select('*').eq('restaurant_id', targetId),
+        supabase.from('branches').select('*').eq('restaurant_id', targetId),
+        supabase
+          .from('coupons')
+          .select('*')
+          .eq('restaurant_id', targetId)
+          .eq('is_active', true),
+      ]);
+
+      const queryErr = catsErr || itemsErr || zonesErr || branchesErr || couponsErr;
+      if (queryErr) {
+        throw new Error(`تعذر قراءة بيانات المنيو من قاعدة البيانات: ${queryErr.message}`);
       }
-      if (!restErr && !restRow && restaurantId !== DEFAULT_RESTAURANT_ID) {
-        return null;
-      }
-    } catch (err) {
-      console.error('Supabase read error, falling back to edge store:', err);
+
+      const bundle: RestaurantBundle = {
+        restaurant: mapSupabaseRestaurant(restRow),
+        categories: (cats ?? []).map((c) => ({
+          id: c.id,
+          restaurantId: c.restaurant_id,
+          name: c.name,
+          description: c.description ?? '',
+          sortOrder: Number(c.sort_order ?? 0),
+        })),
+        items: (items ?? []).map((i) => mapSupabaseMenuItem(i as Record<string, unknown>)),
+        deliveryZones: (zones ?? []).map((z) => ({
+          id: z.id,
+          restaurantId: z.restaurant_id,
+          name: z.name,
+          fee: Number(z.fee ?? 0),
+          minOrderAmount: Number(z.min_order_amount ?? 0),
+          estimatedMinutes: z.estimated_minutes ?? '٣٠ - ٤٥ دقيقة',
+          isActive: Boolean(z.is_active),
+        })),
+        branches: (branches ?? []).map((b) => ({
+          id: b.id,
+          restaurantId: b.restaurant_id,
+          name: b.name,
+          address: b.address ?? '',
+          phone: b.phone ?? '',
+          hoursText: b.hours_text ?? '',
+          isOpen: Boolean(b.is_open),
+        })),
+        activeCoupons: (coupons ?? []).map((cp) => ({
+          id: cp.id,
+          restaurantId: cp.restaurant_id,
+          code: cp.code,
+          description: cp.description ?? '',
+          discountType: cp.discount_type,
+          discountValue: Number(cp.discount_value ?? 0),
+          minOrderAmount: Number(cp.min_order_amount ?? 0),
+          maxDiscountAmount: cp.max_discount_amount ? Number(cp.max_discount_amount) : undefined,
+          validFrom: cp.valid_from ?? '',
+          validUntil: cp.valid_until ?? '',
+          usageLimit: Number(cp.usage_limit ?? 0),
+          usedCount: Number(cp.used_count ?? 0),
+          isActive: Boolean(cp.is_active),
+          applicableCategoryIds: cp.applicable_category_ids ?? [],
+          applicableItemIds: cp.applicable_item_ids ?? [],
+        })),
+      };
+      return resolveExactRestaurantBundle(bundle, restaurantId);
+    }
+
+    if (restaurantId !== DEFAULT_RESTAURANT_ID) {
+      return null;
     }
   }
 
@@ -441,7 +504,10 @@ export async function updateRestaurant(
       system_settings: merged.systemSettings,
       updated_at: merged.updatedAt,
     });
-    if (!error) return merged;
+    if (error) {
+      throw new Error(`فشل تحديث بيانات المطعم في قاعدة البيانات: ${error.message}`);
+    }
+    return merged;
   }
 
   const db = await readEdgeDb(env);
@@ -469,7 +535,10 @@ export async function upsertCategory(env: EdgeEnv, category: MenuCategory): Prom
       description: category.description ?? '',
       sort_order: category.sortOrder,
     });
-    if (!error) return category;
+    if (error) {
+      throw new Error(`فشل حفظ القسم في قاعدة البيانات: ${error.message}`);
+    }
+    return category;
   }
 
   const db = await readEdgeDb(env);
@@ -492,7 +561,10 @@ export async function deleteCategory(
       .delete()
       .eq('id', categoryId)
       .eq('restaurant_id', restaurantId);
-    if (!error) return;
+    if (error) {
+      throw new Error(`فشل حذف القسم من قاعدة البيانات: ${error.message}`);
+    }
+    return;
   }
 
   const db = await readEdgeDb(env);
@@ -518,13 +590,16 @@ export async function upsertMenuItem(env: EdgeEnv, item: MenuItem): Promise<Menu
       image_url: item.imageUrl,
       is_available: item.isAvailable,
       is_popular: Boolean(item.isPopular),
-      stock_quantity: item.stockQuantity,
-      low_stock_threshold: item.lowStockThreshold,
+      stock_quantity: item.stockQuantity ?? 40,
+      low_stock_threshold: item.lowStockThreshold ?? 8,
       sizes: item.sizes ?? [],
       extras: item.extras ?? [],
       sort_order: item.sortOrder,
     });
-    if (!error) return item;
+    if (error) {
+      throw new Error(`فشل حفظ الصنف في قاعدة البيانات: ${error.message}`);
+    }
+    return item;
   }
 
   const db = await readEdgeDb(env);
@@ -542,7 +617,7 @@ export async function reorderMenuItems(
 ): Promise<void> {
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
-    await Promise.all(
+    const results = await Promise.all(
       orderedIds.map((id, index) =>
         supabase
           .from('menu_items')
@@ -551,6 +626,10 @@ export async function reorderMenuItems(
           .eq('restaurant_id', restaurantId)
       )
     );
+    const failed = results.find((r) => r.error);
+    if (failed?.error) {
+      throw new Error(`فشل تحديث ترتيب الأصناف: ${failed.error.message}`);
+    }
     return;
   }
 
@@ -576,7 +655,10 @@ export async function deleteMenuItem(
       .delete()
       .eq('id', itemId)
       .eq('restaurant_id', restaurantId);
-    if (!error) return;
+    if (error) {
+      throw new Error(`فشل حذف الصنف من قاعدة البيانات: ${error.message}`);
+    }
+    return;
   }
 
   const db = await readEdgeDb(env);
@@ -599,7 +681,10 @@ export async function upsertDeliveryZone(
       estimated_minutes: zone.estimatedMinutes,
       is_active: zone.isActive,
     });
-    if (!error) return zone;
+    if (error) {
+      throw new Error(`فشل حفظ منطقة التوصيل في قاعدة البيانات: ${error.message}`);
+    }
+    return zone;
   }
 
   const db = await readEdgeDb(env);
@@ -622,7 +707,10 @@ export async function deleteDeliveryZone(
       .delete()
       .eq('id', zoneId)
       .eq('restaurant_id', restaurantId);
-    if (!error) return;
+    if (error) {
+      throw new Error(`فشل حذف منطقة التوصيل: ${error.message}`);
+    }
+    return;
   }
 
   const db = await readEdgeDb(env);
@@ -647,7 +735,10 @@ export async function upsertBranch(
       hours_text: branch.hoursText,
       is_open: branch.isOpen,
     });
-    if (!error) return branch;
+    if (error) {
+      throw new Error(`فشل حفظ بيانات الفرع: ${error.message}`);
+    }
+    return branch;
   }
 
   const db = await readEdgeDb(env);
@@ -670,7 +761,10 @@ export async function deleteBranch(
       .delete()
       .eq('id', branchId)
       .eq('restaurant_id', restaurantId);
-    if (!error) return;
+    if (error) {
+      throw new Error(`فشل حذف الفرع: ${error.message}`);
+    }
+    return;
   }
 
   const db = await readEdgeDb(env);
@@ -687,25 +781,26 @@ export async function listCoupons(env: EdgeEnv, restaurantId: string): Promise<C
       .from('coupons')
       .select('*')
       .eq('restaurant_id', restaurantId);
-    if (!error && data) {
-      return data.map((cp) => ({
-        id: cp.id,
-        restaurantId: cp.restaurant_id,
-        code: cp.code,
-        description: cp.description ?? '',
-        discountType: cp.discount_type,
-        discountValue: Number(cp.discount_value ?? 0),
-        minOrderAmount: Number(cp.min_order_amount ?? 0),
-        maxDiscountAmount: cp.max_discount_amount ? Number(cp.max_discount_amount) : undefined,
-        validFrom: cp.valid_from ?? '',
-        validUntil: cp.valid_until ?? '',
-        usageLimit: Number(cp.usage_limit ?? 0),
-        usedCount: Number(cp.used_count ?? 0),
-        isActive: Boolean(cp.is_active),
-        applicableCategoryIds: cp.applicable_category_ids ?? [],
-        applicableItemIds: cp.applicable_item_ids ?? [],
-      }));
+    if (error) {
+      throw new Error(`فشل قراءة الكوبونات: ${error.message}`);
     }
+    return (data ?? []).map((cp) => ({
+      id: cp.id,
+      restaurantId: cp.restaurant_id,
+      code: cp.code,
+      description: cp.description ?? '',
+      discountType: cp.discount_type,
+      discountValue: Number(cp.discount_value ?? 0),
+      minOrderAmount: Number(cp.min_order_amount ?? 0),
+      maxDiscountAmount: cp.max_discount_amount ? Number(cp.max_discount_amount) : undefined,
+      validFrom: cp.valid_from ?? '',
+      validUntil: cp.valid_until ?? '',
+      usageLimit: Number(cp.usage_limit ?? 0),
+      usedCount: Number(cp.used_count ?? 0),
+      isActive: Boolean(cp.is_active),
+      applicableCategoryIds: cp.applicable_category_ids ?? [],
+      applicableItemIds: cp.applicable_item_ids ?? [],
+    }));
   }
 
   const db = await readEdgeDb(env);
@@ -727,13 +822,16 @@ export async function upsertCoupon(env: EdgeEnv, coupon: Coupon): Promise<Coupon
       max_discount_amount: normalized.maxDiscountAmount ?? null,
       valid_from: normalized.validFrom,
       valid_until: normalized.validUntil,
-      usage_limit: normalized.usageLimit,
-      used_count: normalized.usedCount,
+      usage_limit: normalized.usageLimit ?? 0,
+      used_count: normalized.usedCount ?? 0,
       is_active: normalized.isActive,
       applicable_category_ids: normalized.applicableCategoryIds ?? [],
       applicable_item_ids: normalized.applicableItemIds ?? [],
     });
-    if (!error) return normalized;
+    if (error) {
+      throw new Error(`فشل حفظ كوبون الخصم: ${error.message}`);
+    }
+    return normalized;
   }
 
   const db = await readEdgeDb(env);
@@ -756,7 +854,10 @@ export async function deleteCoupon(
       .delete()
       .eq('id', couponId)
       .eq('restaurant_id', restaurantId);
-    if (!error) return;
+    if (error) {
+      throw new Error(`فشل حذف الكوبون: ${error.message}`);
+    }
+    return;
   }
 
   const db = await readEdgeDb(env);
@@ -774,7 +875,8 @@ export async function incrementCouponUsage(
   const upper = code.trim().toUpperCase();
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
-    await incrementCouponUsageSupabase(supabase, restaurantId, upper).catch(() => {});
+    await incrementCouponUsageSupabase(supabase, restaurantId, upper);
+    return;
   }
   const db = await readEdgeDb(env);
   const idx = db.coupons.findIndex(
@@ -794,9 +896,10 @@ export async function listOrders(env: EdgeEnv, restaurantId: string): Promise<Or
       .select('*')
       .eq('restaurant_id', restaurantId)
       .order('created_at', { ascending: false });
-    if (!error && data) {
-      return data.map((row) => mapSupabaseOrder(row));
+    if (error) {
+      throw new Error(`فشل قراءة الطلبات من قاعدة البيانات: ${error.message}`);
     }
+    return (data ?? []).map((row) => mapSupabaseOrder(row));
   }
   if (isProductionSupabaseRequired(env)) {
     throw new Error('Supabase database is required in production mode.');
@@ -808,6 +911,38 @@ export async function listOrders(env: EdgeEnv, restaurantId: string): Promise<Or
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
+export async function listCustomers(env: EdgeEnv, restaurantId: string): Promise<Customer[]> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('customers')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .order('last_order_at', { ascending: false, nullsFirst: false });
+    if (error) {
+      throw new Error(`فشل قراءة بيانات العملاء: ${error.message}`);
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      restaurantId: String(row.restaurant_id),
+      name: String(row.name),
+      phone: String(row.phone),
+      defaultAddress: String(row.default_address ?? ''),
+      lastZoneId: row.last_zone_id ? String(row.last_zone_id) : undefined,
+      ordersCount: Number(row.orders_count ?? 0),
+      totalSpent: Number(row.total_spent ?? 0),
+      lastOrderAt: row.last_order_at ? String(row.last_order_at) : undefined,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    }));
+  }
+
+  const db = await readEdgeDb(env);
+  return db.customers
+    .filter((c) => c.restaurantId === restaurantId)
+    .sort((a, b) => new Date(b.lastOrderAt || b.createdAt).getTime() - new Date(a.lastOrderAt || a.createdAt).getTime());
+}
+
 export async function findOrderByToken(
   env: EdgeEnv,
   restaurantId: string,
@@ -817,10 +952,9 @@ export async function findOrderByToken(
   if (!clean) return null;
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
-    const remote = await findOrderByTokenSupabase(supabase, restaurantId, clean);
-    if (remote) return remote;
+    return findOrderByTokenSupabase(supabase, restaurantId, clean);
   }
-  if (isProductionSupabaseRequired(env) && !supabase) {
+  if (isProductionSupabaseRequired(env)) {
     throw new Error('Supabase database is required in production mode.');
   }
   const db = await readEdgeDb(env);
@@ -834,8 +968,26 @@ export async function findOrderByNumberOrId(
 ): Promise<Order | null> {
   const clean = query.replace(/^#/, '').trim();
   if (!clean) return null;
-  const orders = await listOrders(env, restaurantId);
-  return orders.find((o) => o.orderNumber === clean || o.id === clean) ?? null;
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .or(`order_number.eq.${clean},id.eq.${clean}`)
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`فشل البحث عن الطلب: ${error.message}`);
+    }
+    return data ? mapSupabaseOrder(data) : null;
+  }
+  const db = await readEdgeDb(env);
+  return (
+    db.orders.find(
+      (o) => o.restaurantId === restaurantId && (o.orderNumber === clean || o.id === clean)
+    ) ?? null
+  );
 }
 
 export async function findOrdersByPhone(
@@ -855,8 +1007,25 @@ export async function findOrderByIdempotencyKey(
   idempotencyKey: string
 ): Promise<Order | null> {
   if (!idempotencyKey) return null;
-  const orders = await listOrders(env, restaurantId);
-  return orders.find((o) => o.idempotencyKey === idempotencyKey) ?? null;
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .eq('idempotency_key', idempotencyKey)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`فشل التحقق من تكرار الطلب: ${error.message}`);
+    }
+    return data ? mapSupabaseOrder(data) : null;
+  }
+  const db = await readEdgeDb(env);
+  return (
+    db.orders.find(
+      (o) => o.restaurantId === restaurantId && o.idempotencyKey === idempotencyKey
+    ) ?? null
+  );
 }
 
 export async function createOrder(env: EdgeEnv, order: Order): Promise<Order> {
@@ -896,19 +1065,56 @@ export async function createOrder(env: EdgeEnv, order: Order): Promise<Order> {
       created_at: safeOrder.createdAt,
       updated_at: safeOrder.updatedAt,
     });
-    if (!error) {
-      await insertOrderItemsSupabase(supabase, safeOrder).catch(() => {});
-      return safeOrder;
+    if (error) {
+      throw new Error(`تعذر حفظ الطلب في قاعدة البيانات: ${error.message}`);
     }
-    if (isProductionSupabaseRequired(env)) {
-      throw new Error('Failed to persist order to Supabase.');
-    }
+    await insertOrderItemsSupabase(supabase, safeOrder);
+    await upsertCustomerForOrderSupabase(supabase, safeOrder).catch((err) => {
+      console.error('Customer upsert warning:', err);
+    });
+    await insertOrderNotificationSupabase(supabase, safeOrder).catch(() => {});
+    return safeOrder;
   } else if (isProductionSupabaseRequired(env)) {
     throw new Error('Supabase configuration is required in production mode.');
   }
 
   const db = await readEdgeDb(env);
   db.orders.unshift(safeOrder);
+
+  const cleanPhone = safeOrder.customerPhone.trim();
+  if (cleanPhone) {
+    const custIdx = db.customers.findIndex(
+      (c) => c.restaurantId === safeOrder.restaurantId && c.phone === cleanPhone
+    );
+    if (custIdx >= 0) {
+      const existing = db.customers[custIdx];
+      db.customers[custIdx] = {
+        ...existing,
+        name: safeOrder.customerName,
+        defaultAddress: safeOrder.customerAddress || existing.defaultAddress,
+        lastZoneId: safeOrder.deliveryZoneId || existing.lastZoneId,
+        ordersCount: existing.ordersCount + 1,
+        totalSpent: existing.totalSpent + safeOrder.total,
+        lastOrderAt: safeOrder.createdAt,
+        updatedAt: safeOrder.createdAt,
+      };
+    } else {
+      db.customers.unshift({
+        id: `cust_${safeOrder.restaurantId}_${cleanPhone.replace(/[^\d]/g, '') || cleanPhone}`,
+        restaurantId: safeOrder.restaurantId,
+        name: safeOrder.customerName,
+        phone: cleanPhone,
+        defaultAddress: safeOrder.customerAddress || '',
+        lastZoneId: safeOrder.deliveryZoneId || undefined,
+        ordersCount: 1,
+        totalSpent: safeOrder.total,
+        lastOrderAt: safeOrder.createdAt,
+        createdAt: safeOrder.createdAt,
+        updatedAt: safeOrder.createdAt,
+      });
+    }
+  }
+
   db.notifications.unshift({
     id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
     restaurantId: safeOrder.restaurantId,
@@ -934,6 +1140,86 @@ export async function adjustItemStock(
   }
 ): Promise<MenuItem | null> {
   const { restaurantId, itemId, delta, reason, referenceOrderId } = params;
+  const supabase = getSupabaseAdminClient(env);
+
+  if (supabase) {
+    const { data: row, error: fetchErr } = await supabase
+      .from('menu_items')
+      .select('*')
+      .eq('id', itemId)
+      .eq('restaurant_id', restaurantId)
+      .maybeSingle();
+    if (fetchErr) {
+      throw new Error(`فشل قراءة رصيد الصنف: ${fetchErr.message}`);
+    }
+    if (!row) return null;
+
+    const item = mapSupabaseMenuItem(row as Record<string, unknown>);
+    const prevQty = Number(item.stockQuantity ?? 0);
+    const nextQty = Math.max(0, prevQty + delta);
+    const updatedItem: MenuItem = {
+      ...item,
+      stockQuantity: nextQty,
+      isAvailable: nextQty === 0 ? false : item.isAvailable,
+    };
+    const nowIso = new Date().toISOString();
+    const movement: InventoryMovement = {
+      id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      restaurantId,
+      itemId: item.id,
+      itemName: item.name,
+      change: delta,
+      previousQty: prevQty,
+      newQty: nextQty,
+      reason,
+      referenceOrderId,
+      createdAt: nowIso,
+    };
+
+    const [{ error: updErr }, { error: movErr }] = await Promise.all([
+      supabase
+        .from('menu_items')
+        .update({ stock_quantity: nextQty, is_available: updatedItem.isAvailable })
+        .eq('id', itemId)
+        .eq('restaurant_id', restaurantId),
+      supabase.from('inventory_movements').insert({
+        id: movement.id,
+        restaurant_id: movement.restaurantId,
+        item_id: movement.itemId,
+        item_name: movement.itemName,
+        change: movement.change,
+        previous_qty: movement.previousQty,
+        new_qty: movement.newQty,
+        reason: movement.reason,
+        reference_order_id: movement.referenceOrderId ?? null,
+        created_at: movement.createdAt,
+      }),
+    ]);
+
+    if (updErr || movErr) {
+      throw new Error(`فشل تحديث المخزون: ${(updErr || movErr)!.message}`);
+    }
+
+    const lowStockThreshold = updatedItem.lowStockThreshold ?? 8;
+    if (nextQty <= lowStockThreshold && prevQty > lowStockThreshold) {
+      try {
+        await supabase.from('notifications').insert({
+          id: `notif_stock_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+          restaurant_id: restaurantId,
+          type: 'stock',
+          title: 'تنبيه انخفاض المخزون',
+          message: `صنف "${updatedItem.name}" وصل إلى ${nextQty} وحدات متبقية.`,
+          is_read: false,
+          created_at: nowIso,
+        });
+      } catch {
+        // Non-blocking notification insert
+      }
+    }
+
+    return updatedItem;
+  }
+
   const db = await readEdgeDb(env);
   const idx = db.items.findIndex((i) => i.id === itemId && i.restaurantId === restaurantId);
   if (idx < 0) return null;
@@ -977,30 +1263,6 @@ export async function adjustItemStock(
   }
 
   await writeEdgeDb(env, db);
-
-  const supabase = getSupabaseAdminClient(env);
-  if (supabase) {
-    await Promise.all([
-      supabase
-        .from('menu_items')
-        .update({ stock_quantity: nextQty, is_available: updatedItem.isAvailable })
-        .eq('id', itemId)
-        .eq('restaurant_id', restaurantId),
-      supabase.from('inventory_movements').insert({
-        id: movement.id,
-        restaurant_id: movement.restaurantId,
-        item_id: movement.itemId,
-        item_name: movement.itemName,
-        change: movement.change,
-        previous_qty: movement.previousQty,
-        new_qty: movement.newQty,
-        reason: movement.reason,
-        reference_order_id: movement.referenceOrderId ?? null,
-        created_at: movement.createdAt,
-      }),
-    ]).catch(() => {});
-  }
-
   return updatedItem;
 }
 
@@ -1012,19 +1274,24 @@ export async function updateOrderStatus(
   actorName = 'المدير'
 ): Promise<Order | null> {
   const nowIso = new Date().toISOString();
-  const db = await readEdgeDb(env);
-  const idx = db.orders.findIndex((o) => o.id === orderId && o.restaurantId === restaurantId);
-  let targetOrder: Order | null = idx >= 0 ? db.orders[idx] : null;
-
   const supabase = getSupabaseAdminClient(env);
-  if (!targetOrder && supabase) {
-    const { data } = await supabase
+
+  let targetOrder: Order | null = null;
+  if (supabase) {
+    const { data, error } = await supabase
       .from('orders')
       .select('*')
       .eq('id', orderId)
       .eq('restaurant_id', restaurantId)
       .maybeSingle();
+    if (error) {
+      throw new Error(`فشل قراءة الطلب: ${error.message}`);
+    }
     if (data) targetOrder = mapSupabaseOrder(data);
+  } else {
+    const db = await readEdgeDb(env);
+    targetOrder =
+      db.orders.find((o) => o.id === orderId && o.restaurantId === restaurantId) ?? null;
   }
 
   if (!targetOrder) return null;
@@ -1063,11 +1330,6 @@ export async function updateOrderStatus(
     nextStockDeducted = false;
   }
 
-  const freshDb = await readEdgeDb(env);
-  const freshIdx = freshDb.orders.findIndex(
-    (o) => o.id === orderId && o.restaurantId === restaurantId
-  );
-
   const history = Array.isArray(targetOrder.statusHistory)
     ? [...targetOrder.statusHistory]
     : [];
@@ -1084,6 +1346,36 @@ export async function updateOrderStatus(
     updatedAt: nowIso,
   };
 
+  if (supabase) {
+    const { error: updErr } = await supabase
+      .from('orders')
+      .update({
+        status: updatedOrder.status,
+        stock_deducted: updatedOrder.stockDeducted,
+        payment_status: updatedOrder.paymentStatus,
+        status_history: updatedOrder.statusHistory,
+        updated_at: updatedOrder.updatedAt,
+      })
+      .eq('id', orderId)
+      .eq('restaurant_id', restaurantId);
+    if (updErr) {
+      throw new Error(`فشل تحديث حالة الطلب: ${updErr.message}`);
+    }
+    await appendActivityLog(env, {
+      id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      restaurantId,
+      actorName,
+      action: `تحديث حالة الطلب #${updatedOrder.orderNumber}`,
+      details: `تم تغيير الحالة إلى ${status}`,
+      createdAt: nowIso,
+    }).catch(() => {});
+    return updatedOrder;
+  }
+
+  const freshDb = await readEdgeDb(env);
+  const freshIdx = freshDb.orders.findIndex(
+    (o) => o.id === orderId && o.restaurantId === restaurantId
+  );
   if (freshIdx >= 0) {
     freshDb.orders[freshIdx] = updatedOrder;
   }
@@ -1097,25 +1389,6 @@ export async function updateOrderStatus(
   });
   freshDb.activityLogs = freshDb.activityLogs.slice(0, 100);
   await writeEdgeDb(env, freshDb);
-
-  if (supabase) {
-    try {
-      await supabase
-        .from('orders')
-        .update({
-          status: updatedOrder.status,
-          stock_deducted: updatedOrder.stockDeducted,
-          payment_status: updatedOrder.paymentStatus,
-          status_history: updatedOrder.statusHistory,
-          updated_at: updatedOrder.updatedAt,
-        })
-        .eq('id', orderId)
-        .eq('restaurant_id', restaurantId);
-    } catch {
-      // Ignore remote sync error when edge store succeeded
-    }
-  }
-
   return updatedOrder;
 }
 
@@ -1130,6 +1403,44 @@ export async function rateOrderByToken(
   const cleanToken = orderToken.trim();
   const cleanOrderNumber = (orderNumber || '').replace(/^#/, '').trim();
   if (!cleanToken && !cleanOrderNumber) return null;
+
+  const supabase = getSupabaseAdminClient(env);
+  let target: Order | null = null;
+
+  if (supabase) {
+    if (cleanToken) {
+      target = await findOrderByTokenSupabase(supabase, restaurantId, cleanToken);
+    }
+    if (!target && cleanOrderNumber) {
+      target = await findOrderByNumberOrId(env, restaurantId, cleanOrderNumber);
+    }
+    if (!target) return null;
+    if (target.status !== 'delivered') {
+      throw new Error('يمكن تقييم الطلب فقط بعد تمام التوصيل.');
+    }
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from('orders')
+      .update({
+        rating,
+        rating_comment: comment.trim() || null,
+        rated_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq('id', target.id)
+      .eq('restaurant_id', restaurantId);
+    if (error) {
+      throw new Error(`فشل حفظ تقييم الطلب: ${error.message}`);
+    }
+    return {
+      ...target,
+      rating,
+      ratingComment: comment.trim() || undefined,
+      ratedAt: nowIso,
+      updatedAt: nowIso,
+    };
+  }
+
   const db = await readEdgeDb(env);
   const idx = db.orders.findIndex(
     (o) =>
@@ -1137,19 +1448,7 @@ export async function rateOrderByToken(
       ((cleanToken && o.orderToken === cleanToken) ||
         (cleanOrderNumber && (o.orderNumber === cleanOrderNumber || o.id === cleanOrderNumber)))
   );
-
-  const supabase = getSupabaseAdminClient(env);
-  let target: Order | null = idx >= 0 ? db.orders[idx] : null;
-  if (!target && supabase && cleanToken) {
-    target = await findOrderByTokenSupabase(supabase, restaurantId, cleanToken);
-  }
-  if (!target && supabase && cleanOrderNumber) {
-    const orders = await listOrders(env, restaurantId);
-    target =
-      orders.find(
-        (o) => o.orderNumber === cleanOrderNumber || o.id === cleanOrderNumber
-      ) ?? null;
-  }
+  target = idx >= 0 ? db.orders[idx] : null;
   if (!target) return null;
 
   if (target.status !== 'delivered') {
@@ -1167,23 +1466,6 @@ export async function rateOrderByToken(
   if (idx >= 0) {
     db.orders[idx] = updated;
     await writeEdgeDb(env, db);
-  }
-
-  if (supabase) {
-    try {
-      await supabase
-        .from('orders')
-        .update({
-          rating,
-          rating_comment: comment.trim() || null,
-          rated_at: nowIso,
-          updated_at: nowIso,
-        })
-        .eq('id', target.id)
-        .eq('restaurant_id', restaurantId);
-    } catch {
-      // Ignore
-    }
   }
   return updated;
 }
@@ -1203,11 +1485,59 @@ export async function listInventoryMovements(
   env: EdgeEnv,
   restaurantId: string
 ): Promise<InventoryMovement[]> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('inventory_movements')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .order('created_at', { ascending: false })
+      .limit(120);
+    if (error) {
+      throw new Error(`فشل قراءة حركات المخزون: ${error.message}`);
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      restaurantId: String(row.restaurant_id),
+      itemId: String(row.item_id),
+      itemName: String(row.item_name),
+      change: Number(row.change),
+      previousQty: Number(row.previous_qty),
+      newQty: Number(row.new_qty),
+      reason: String(row.reason),
+      referenceOrderId: row.reference_order_id ? String(row.reference_order_id) : undefined,
+      createdAt: String(row.created_at),
+    }));
+  }
+
   const db = await readEdgeDb(env);
   return db.inventoryMovements.filter((m) => m.restaurantId === restaurantId);
 }
 
 export async function listEmployees(env: EdgeEnv, restaurantId: string): Promise<Employee[]> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('employees')
+      .select('id, restaurant_id, name, email, phone, role, must_change_password, is_active, created_at')
+      .eq('restaurant_id', restaurantId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      throw new Error(`فشل قراءة بيانات الموظفين: ${error.message}`);
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      restaurantId: String(row.restaurant_id),
+      name: String(row.name),
+      email: String(row.email),
+      phone: String(row.phone ?? ''),
+      role: String(row.role) as EmployeeRole,
+      mustChangePassword: Boolean(row.must_change_password),
+      isActive: Boolean(row.is_active),
+      createdAt: String(row.created_at),
+    }));
+  }
+
   const db = await readEdgeDb(env);
   return db.employees
     .filter((e) => e.restaurantId === restaurantId)
@@ -1220,6 +1550,33 @@ export async function findEmployeeByEmail(
   email: string
 ): Promise<Employee | null> {
   const clean = email.trim().toLowerCase();
+  if (!clean) return null;
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('employees')
+      .select('id, restaurant_id, name, email, phone, role, must_change_password, is_active, created_at')
+      .eq('restaurant_id', restaurantId)
+      .ilike('email', clean)
+      .eq('is_active', true)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`فشل البحث عن الموظف: ${error.message}`);
+    }
+    if (!data) return null;
+    return {
+      id: String(data.id),
+      restaurantId: String(data.restaurant_id),
+      name: String(data.name),
+      email: String(data.email),
+      phone: String(data.phone ?? ''),
+      role: String(data.role) as EmployeeRole,
+      mustChangePassword: Boolean(data.must_change_password),
+      isActive: Boolean(data.is_active),
+      createdAt: String(data.created_at),
+    };
+  }
+
   const db = await readEdgeDb(env);
   return (
     db.employees.find(
@@ -1229,6 +1586,26 @@ export async function findEmployeeByEmail(
 }
 
 export async function upsertEmployee(env: EdgeEnv, emp: Employee): Promise<Employee> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { error } = await supabase.from('employees').upsert({
+      id: emp.id,
+      restaurant_id: emp.restaurantId,
+      name: emp.name,
+      email: emp.email.trim().toLowerCase(),
+      phone: emp.phone ?? '',
+      role: emp.role,
+      must_change_password: Boolean(emp.mustChangePassword ?? true),
+      is_active: emp.isActive,
+      created_at: emp.createdAt,
+    });
+    if (error) {
+      throw new Error(`فشل حفظ بيانات الموظف: ${error.message}`);
+    }
+    const { passwordHash: _omitted, ...safe } = emp;
+    return safe;
+  }
+
   const db = await readEdgeDb(env);
   const idx = db.employees.findIndex((e) => e.id === emp.id);
   const existing = idx >= 0 ? db.employees[idx] : null;
@@ -1249,6 +1626,19 @@ export async function deleteEmployee(
   restaurantId: string,
   employeeId: string
 ): Promise<void> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { error } = await supabase
+      .from('employees')
+      .delete()
+      .eq('id', employeeId)
+      .eq('restaurant_id', restaurantId);
+    if (error) {
+      throw new Error(`فشل حذف الموظف: ${error.message}`);
+    }
+    return;
+  }
+
   const db = await readEdgeDb(env);
   db.employees = db.employees.filter(
     (e) => !(e.id === employeeId && e.restaurantId === restaurantId)
@@ -1257,6 +1647,22 @@ export async function deleteEmployee(
 }
 
 export async function appendActivityLog(env: EdgeEnv, entry: ActivityLog): Promise<void> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { error } = await supabase.from('activity_logs').insert({
+      id: entry.id,
+      restaurant_id: entry.restaurantId,
+      actor_name: entry.actorName,
+      action: entry.action,
+      details: entry.details,
+      created_at: entry.createdAt,
+    });
+    if (error) {
+      throw new Error(`فشل تسجيل سجل النشاط: ${error.message}`);
+    }
+    return;
+  }
+
   const db = await readEdgeDb(env);
   db.activityLogs.unshift(entry);
   db.activityLogs = db.activityLogs.slice(0, 120);
@@ -1267,6 +1673,27 @@ export async function listActivityLogs(
   env: EdgeEnv,
   restaurantId: string
 ): Promise<ActivityLog[]> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('activity_logs')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) {
+      throw new Error(`فشل قراءة سجل النشاط: ${error.message}`);
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      restaurantId: String(row.restaurant_id),
+      actorName: String(row.actor_name),
+      action: String(row.action),
+      details: String(row.details ?? ''),
+      createdAt: String(row.created_at),
+    }));
+  }
+
   const db = await readEdgeDb(env);
   return db.activityLogs.filter((l) => l.restaurantId === restaurantId);
 }
@@ -1275,11 +1702,46 @@ export async function listNotifications(
   env: EdgeEnv,
   restaurantId: string
 ): Promise<AdminNotification[]> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('restaurant_id', restaurantId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (error) {
+      throw new Error(`فشل قراءة الإشعارات: ${error.message}`);
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      restaurantId: String(row.restaurant_id),
+      type: String(row.type || 'system') as AdminNotification['type'],
+      title: String(row.title),
+      message: String(row.message),
+      isRead: Boolean(row.is_read),
+      createdAt: String(row.created_at),
+    }));
+  }
+
   const db = await readEdgeDb(env);
   return db.notifications.filter((n) => n.restaurantId === restaurantId);
 }
 
 export async function markNotificationsRead(env: EdgeEnv, restaurantId: string): Promise<void> {
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('restaurant_id', restaurantId)
+      .eq('is_read', false);
+    if (error) {
+      throw new Error(`فشل تحديث حالة الإشعارات: ${error.message}`);
+    }
+    return;
+  }
+
   const db = await readEdgeDb(env);
   db.notifications = db.notifications.map((n) =>
     n.restaurantId === restaurantId ? { ...n, isRead: true } : n
@@ -1303,7 +1765,7 @@ export async function appendAiLog(env: EdgeEnv, entry: AILogEntry): Promise<void
       });
       return;
     } catch {
-      // Fall back to edge db
+      return;
     }
   }
 
@@ -1322,18 +1784,19 @@ export async function listAiLogs(env: EdgeEnv, restaurantId: string): Promise<AI
       .eq('restaurant_id', restaurantId)
       .order('timestamp', { ascending: false })
       .limit(40);
-    if (!error && data) {
-      return data.map((row) => ({
-        id: row.id,
-        restaurantId: row.restaurant_id,
-        timestamp: row.timestamp,
-        model: row.model,
-        status: row.status,
-        latencyMs: Number(row.latency_ms),
-        userMessagePreview: row.user_message_preview,
-        errorMessage: row.error_message ?? undefined,
-      }));
+    if (error) {
+      throw new Error(`فشل قراءة سجلات الذكاء الاصطناعي: ${error.message}`);
     }
+    return (data ?? []).map((row) => ({
+      id: row.id,
+      restaurantId: row.restaurant_id,
+      timestamp: row.timestamp,
+      model: row.model,
+      status: row.status,
+      latencyMs: Number(row.latency_ms),
+      userMessagePreview: row.user_message_preview,
+      errorMessage: row.error_message ?? undefined,
+    }));
   }
 
   const db = await readEdgeDb(env);
@@ -1390,10 +1853,14 @@ export async function uploadImageAsset(
     const { error } = await supabase.storage
       .from('restaurant-assets')
       .upload(uniqueName, binary, { contentType: mimeType, upsert: false });
-    if (!error) {
-      const { data } = supabase.storage.from('restaurant-assets').getPublicUrl(uniqueName);
-      if (data?.publicUrl) return data.publicUrl;
+    if (error) {
+      throw new Error(`فشل رفع الصورة إلى Supabase Storage: ${error.message}`);
     }
+    const { data } = supabase.storage.from('restaurant-assets').getPublicUrl(uniqueName);
+    if (!data?.publicUrl) {
+      throw new Error('تم رفع الصورة لكن تعذر الحصول على الرابط العام.');
+    }
+    return data.publicUrl;
   }
 
   return `data:${mimeType};base64,${cleanBase64}`;

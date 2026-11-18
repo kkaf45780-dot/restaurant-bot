@@ -30,6 +30,7 @@ import {
   listActivityLogs,
   listAiLogs,
   listCoupons,
+  listCustomers,
   listEmployees,
   listInventoryMovements,
   listNotifications,
@@ -48,6 +49,7 @@ import {
   upsertEmployee,
   upsertMenuItem,
   verifyAdminPassword,
+  verifySupabaseAdminAccess,
 } from './server/edgeStore.ts';
 import {
   type KVStoreLike,
@@ -195,13 +197,6 @@ async function verifyLocalAdminToken(
   }
 }
 
-async function resolveRoleForEmail(env: EdgeEnv, email: string): Promise<EmployeeRole> {
-  const expectedOwner = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-  if (email.trim().toLowerCase() === expectedOwner) return 'owner';
-  const emp = await findEmployeeByEmail(env, DEFAULT_RESTAURANT_ID, email);
-  return emp?.role ?? 'owner';
-}
-
 function getSessionSecret(env: EdgeEnv): string {
   return env.ADMIN_SESSION_SECRET || DEFAULT_SESSION_SECRET;
 }
@@ -228,12 +223,23 @@ async function verifyAdminRequest(
       const sb = createClient(supabaseUrl, supabaseKey);
       const { data, error } = await sb.auth.getUser(token);
       if (!error && data.user) {
-        const userEmail = data.user.email ?? 'admin';
-        const role = await resolveRoleForEmail(env, userEmail);
-        return { email: userEmail, role };
+        const userEmail = data.user.email ?? '';
+        const access = await verifySupabaseAdminAccess(
+          env,
+          data.user.id,
+          userEmail,
+          DEFAULT_RESTAURANT_ID
+        );
+        if (!access.allowed) {
+          return Response.json(
+            { error: 'هذا الحساب غير مصرح له بإدارة لوحة التحكم.' },
+            { status: 403 }
+          );
+        }
+        return { email: userEmail || 'admin', role: access.role ?? 'owner' };
       }
     } catch {
-      // Fall through
+      // Fall through to 401
     }
   }
 
@@ -991,6 +997,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           employees,
           activityLogs,
           notifications,
+          customers,
         ] = await Promise.all([
           getRestaurantBundle(env, restaurantId),
           listOrders(env, restaurantId),
@@ -1000,6 +1007,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           listEmployees(env, restaurantId),
           listActivityLogs(env, restaurantId),
           listNotifications(env, restaurantId),
+          listCustomers(env, restaurantId),
         ]);
         const hoursStatus = evaluateRestaurantHours(bundle.restaurant);
         return Response.json({
@@ -1012,6 +1020,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           employees,
           activityLogs,
           notifications,
+          customers,
           configStatus: getServiceConfigStatus(env),
         });
       } catch (err) {
@@ -1064,8 +1073,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         if (!cat.name) return Response.json({ error: 'اسم القسم مطلوب.' }, { status: 400 });
         const saved = await upsertCategory(env, cat);
         return Response.json({ category: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ القسم.' }, { status: 500 });
+      } catch (err) {
+        console.error('Upsert category error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر حفظ القسم.' },
+          { status: 500 }
+        );
       }
     }
 
@@ -1077,8 +1090,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteCategory(env, restaurantId, decodeURIComponent(delCatMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف القسم.' }, { status: 500 });
+      } catch (err) {
+        console.error('Delete category error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر حذف القسم.' },
+          { status: 500 }
+        );
       }
     }
 
@@ -1109,8 +1126,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         };
         const saved = await upsertMenuItem(env, item);
         return Response.json({ item: saved });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ الصنف.' }, { status: 500 });
+      } catch (err) {
+        console.error('Upsert item error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر حفظ الصنف.' },
+          { status: 500 }
+        );
       }
     }
 
@@ -1125,8 +1146,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         }
         await reorderMenuItems(env, restaurantId, orderedIds);
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حفظ ترتيب الأصناف.' }, { status: 500 });
+      } catch (err) {
+        console.error('Reorder items error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر حفظ ترتيب الأصناف.' },
+          { status: 500 }
+        );
       }
     }
 
@@ -1138,8 +1163,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
         await deleteMenuItem(env, restaurantId, decodeURIComponent(delItemMatch[1]));
         return Response.json({ ok: true });
-      } catch {
-        return Response.json({ error: 'تعذر حذف الصنف.' }, { status: 500 });
+      } catch (err) {
+        console.error('Delete item error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر حذف الصنف.' },
+          { status: 500 }
+        );
       }
     }
 
@@ -1363,6 +1392,25 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       }
     }
 
+    const getOrderMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)$/);
+    if (method === 'GET' && getOrderMatch && getOrderMatch[1] !== 'export') {
+      const denied = checkPermission(auth.role, 'orders');
+      if (denied) return denied;
+      try {
+        const restaurantId = url.searchParams.get('restaurantId') || DEFAULT_RESTAURANT_ID;
+        const order = await findOrderByNumberOrId(
+          env,
+          restaurantId,
+          decodeURIComponent(getOrderMatch[1])
+        );
+        if (!order) return Response.json({ error: 'الطلب غير موجود.' }, { status: 404 });
+        return Response.json({ order });
+      } catch (err) {
+        console.error('Get admin order error:', err);
+        return Response.json({ error: 'تعذر تحميل بيانات الطلب.' }, { status: 500 });
+      }
+    }
+
     const orderStatusMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)\/status$/);
     if (method === 'PATCH' && orderStatusMatch) {
       const denied = checkPermission(auth.role, 'orders');
@@ -1391,8 +1439,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         );
         if (!updated) return Response.json({ error: 'الطلب غير موجود.' }, { status: 404 });
         return Response.json({ order: updated });
-      } catch {
-        return Response.json({ error: 'تعذر تحديث حالة الطلب.' }, { status: 500 });
+      } catch (err) {
+        console.error('Update order status error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر تحديث حالة الطلب.' },
+          { status: 500 }
+        );
       }
     }
 
@@ -1495,8 +1547,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           cleanBase64
         );
         return Response.json({ url: uploadedUrl });
-      } catch {
-        return Response.json({ error: 'تعذر رفع الصورة حالياً.' }, { status: 500 });
+      } catch (err) {
+        console.error('Upload image error:', err);
+        return Response.json(
+          { error: err instanceof Error ? err.message : 'تعذر رفع الصورة حالياً.' },
+          { status: 500 }
+        );
       }
     }
   }

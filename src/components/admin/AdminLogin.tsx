@@ -1,6 +1,6 @@
 import { ArrowRight, Lock } from 'lucide-react';
 import { useState } from 'react';
-import { adminLoginLocal } from '../../lib/api.ts';
+import { adminLoginLocal, fetchAdminMe } from '../../lib/api.ts';
 import { isSupabaseClientConfigured, supabase } from '../../lib/supabase.ts';
 
 interface AdminLoginProps {
@@ -33,6 +33,12 @@ export function AdminLogin({
           password,
         });
         if (!error && data.session?.access_token) {
+          try {
+            await fetchAdminMe(data.session.access_token);
+          } catch {
+            await supabase.auth.signOut().catch(() => {});
+            throw new Error('هذا الحساب غير مصرح له بالدخول إلى لوحة تحكم المدير.');
+          }
           onSuccess(data.session.access_token, data.user?.email ?? email.trim());
           return;
         }

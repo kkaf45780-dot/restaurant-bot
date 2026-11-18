@@ -36,6 +36,7 @@ import {
 } from '../lib/chatStorage.ts';
 import type { RestaurantHoursStatus } from '../lib/hours.ts';
 import { buildDraftLineKey } from '../lib/pricing.ts';
+import { supabase } from '../lib/supabase.ts';
 import type {
   ChatChallengeResponse,
   ChatMessage,
@@ -234,9 +235,71 @@ export function CustomerPage({
     }
   }, [hydrateAfterBundle]);
 
+  const refreshPublicBundle = useCallback(async () => {
+    try {
+      const data = await fetchRestaurantBundle();
+      setBundle(data.bundle);
+      setHoursStatus(data.hoursStatus);
+      setIsUsingCachedBundle(false);
+      document.title = `موظف المطعم — ${data.bundle.restaurant.name}`;
+      setSelectedProductModal((prev) => {
+        if (!prev) return null;
+        return data.bundle.items.find((item) => item.id === prev.id) ?? prev;
+      });
+      try {
+        localStorage.setItem(CACHED_BUNDLE_KEY, JSON.stringify(data));
+      } catch {
+        // Ignore quota exceeded
+      }
+    } catch {
+      // Keep current storefront state on silent background refresh failure
+    }
+  }, []);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    const client = supabase;
+    const restId = bundle?.restaurant.id;
+    if (!client || !restId) return;
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        void refreshPublicBundle();
+      }, 300);
+    };
+
+    const channel = client.channel(`customer-menu-sync-${restId}`);
+    const restScopedTables = [
+      'menu_categories',
+      'menu_items',
+      'delivery_zones',
+      'branches',
+      'coupons',
+    ];
+    for (const table of restScopedTables) {
+      channel.on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table, filter: `restaurant_id=eq.${restId}` },
+        scheduleRefresh
+      );
+    }
+    channel.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'restaurants', filter: `id=eq.${restId}` },
+      scheduleRefresh
+    );
+    channel.subscribe();
+
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      void client.removeChannel(channel);
+    };
+  }, [bundle?.restaurant.id, refreshPublicBundle]);
 
   useEffect(() => {
     if (!bundle) return;

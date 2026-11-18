@@ -51,6 +51,7 @@ import {
   listActivityLogs,
   listAiLogs,
   listCoupons,
+  listCustomers,
   listEmployees,
   listInventoryMovements,
   listNotifications,
@@ -69,6 +70,7 @@ import {
   upsertEmployee,
   upsertMenuItem,
   verifyLocalAdminPassword,
+  verifySupabaseAdminAccess,
 } from './src/server/store.ts';
 import {
   ALLOWED_AI_MODELS,
@@ -154,13 +156,6 @@ function verifyLocalAdminToken(token: string): { email: string; role: EmployeeRo
   }
 }
 
-async function resolveRoleForEmail(email: string): Promise<EmployeeRole> {
-  const expectedOwner = (process.env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
-  if (email.trim().toLowerCase() === expectedOwner) return 'owner';
-  const emp = await findEmployeeByEmail(DEFAULT_RESTAURANT_ID, email);
-  return emp?.role ?? 'owner';
-}
-
 async function verifyAdminRequest(
   req: Request,
   res: Response,
@@ -183,14 +178,25 @@ async function verifyAdminRequest(
       const sb = createClient(supabaseUrl, supabaseKey);
       const { data, error } = await sb.auth.getUser(token);
       if (!error && data.user) {
-        const userEmail = data.user.email ?? 'admin';
-        (req as AdminRequest).adminEmail = userEmail;
-        (req as AdminRequest).adminRole = await resolveRoleForEmail(userEmail);
+        const userEmail = data.user.email ?? '';
+        const access = await verifySupabaseAdminAccess(
+          data.user.id,
+          userEmail,
+          DEFAULT_RESTAURANT_ID
+        );
+        if (!access.allowed) {
+          res.status(403).json({
+            error: 'هذا الحساب غير مصرح له بإدارة لوحة التحكم.',
+          });
+          return;
+        }
+        (req as AdminRequest).adminEmail = userEmail || 'admin';
+        (req as AdminRequest).adminRole = access.role ?? 'owner';
         next();
         return;
       }
     } catch {
-      // Fall through
+      // Fall through to 401
     }
   }
 
@@ -891,6 +897,7 @@ async function startServer(): Promise<void> {
         employees,
         activityLogs,
         notifications,
+        customers,
       ] = await Promise.all([
         getRestaurantBundle(restaurantId),
         listOrders(restaurantId),
@@ -900,6 +907,7 @@ async function startServer(): Promise<void> {
         listEmployees(restaurantId),
         listActivityLogs(restaurantId),
         listNotifications(restaurantId),
+        listCustomers(restaurantId),
       ]);
       const hoursStatus = evaluateRestaurantHours(bundle.restaurant);
       res.json({
@@ -912,6 +920,7 @@ async function startServer(): Promise<void> {
         employees,
         activityLogs,
         notifications,
+        customers,
         configStatus: getServiceConfigStatus(),
       });
     } catch (err) {
@@ -972,8 +981,11 @@ async function startServer(): Promise<void> {
         }
         const saved = await upsertCategory(cat);
         res.json({ category: saved });
-      } catch {
-        res.status(500).json({ error: 'تعذر حفظ القسم.' });
+      } catch (err) {
+        console.error('Upsert category error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر حفظ القسم.',
+        });
       }
     }
   );
@@ -987,8 +999,11 @@ async function startServer(): Promise<void> {
         const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
         await deleteCategory(restaurantId, req.params.id);
         res.json({ ok: true });
-      } catch {
-        res.status(500).json({ error: 'تعذر حذف القسم.' });
+      } catch (err) {
+        console.error('Delete category error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر حذف القسم.',
+        });
       }
     }
   );
@@ -1023,8 +1038,11 @@ async function startServer(): Promise<void> {
         };
         const saved = await upsertMenuItem(item);
         res.json({ item: saved });
-      } catch {
-        res.status(500).json({ error: 'تعذر حفظ الصنف.' });
+      } catch (err) {
+        console.error('Upsert item error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر حفظ الصنف.',
+        });
       }
     }
   );
@@ -1042,8 +1060,11 @@ async function startServer(): Promise<void> {
         }
         await reorderMenuItems(restaurantId, orderedIds);
         res.json({ ok: true });
-      } catch {
-        res.status(500).json({ error: 'تعذر حفظ ترتيب الأصناف.' });
+      } catch (err) {
+        console.error('Reorder items error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر حفظ ترتيب الأصناف.',
+        });
       }
     }
   );
@@ -1057,8 +1078,11 @@ async function startServer(): Promise<void> {
         const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
         await deleteMenuItem(restaurantId, req.params.id);
         res.json({ ok: true });
-      } catch {
-        res.status(500).json({ error: 'تعذر حذف الصنف.' });
+      } catch (err) {
+        console.error('Delete item error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر حذف الصنف.',
+        });
       }
     }
   );
@@ -1321,8 +1345,11 @@ async function startServer(): Promise<void> {
           return;
         }
         res.json({ order: updated });
-      } catch {
-        res.status(500).json({ error: 'تعذر تحديث حالة الطلب.' });
+      } catch (err) {
+        console.error('Update order status error:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'تعذر تحديث حالة الطلب.',
+        });
       }
     }
   );
@@ -1378,6 +1405,26 @@ async function startServer(): Promise<void> {
     }
   );
 
+  app.get(
+    '/api/admin/orders/:id',
+    verifyAdminRequest,
+    requirePermission('orders'),
+    async (req, res) => {
+      try {
+        const restaurantId = String(req.query.restaurantId || DEFAULT_RESTAURANT_ID);
+        const order = await findOrderByNumberOrId(restaurantId, req.params.id);
+        if (!order) {
+          res.status(404).json({ error: 'الطلب غير موجود.' });
+          return;
+        }
+        res.json({ order });
+      } catch (err) {
+        console.error('Get admin order error:', err);
+        res.status(500).json({ error: 'تعذر تحميل بيانات الطلب.' });
+      }
+    }
+  );
+
   app.post(
     '/api/admin/password',
     verifyAdminRequest,
@@ -1415,8 +1462,11 @@ async function startServer(): Promise<void> {
       }
       const url = await uploadImageAsset(String(filename), String(mimeType), buffer);
       res.json({ url });
-    } catch {
-      res.status(500).json({ error: 'تعذر رفع الصورة حالياً.' });
+    } catch (err) {
+      console.error('Upload image error:', err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'تعذر رفع الصورة حالياً.',
+      });
     }
   });
 

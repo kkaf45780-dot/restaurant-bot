@@ -50,6 +50,7 @@ create table if not exists public.menu_categories (
   restaurant_id text not null references public.restaurants(id) on delete cascade,
   name text not null,
   description text default '',
+  image_url text not null default '',
   sort_order integer not null default 0
 );
 
@@ -106,7 +107,7 @@ create table if not exists public.coupons (
 create table if not exists public.orders (
   id text primary key,
   order_number text not null,
-  order_token uuid unique not null default gen_random_uuid(),
+  order_token text unique not null default gen_random_uuid()::text,
   restaurant_id text not null references public.restaurants(id) on delete cascade,
   customer_name text not null,
   customer_phone text not null,
@@ -223,6 +224,35 @@ create table if not exists public.ai_logs (
   error_message text
 );
 
+-- 15. جدول العملاء
+create table if not exists public.customers (
+  id text primary key,
+  restaurant_id text not null references public.restaurants(id) on delete cascade,
+  name text not null,
+  phone text not null,
+  default_address text not null default '',
+  last_zone_id text,
+  orders_count integer not null default 0,
+  total_spent numeric(10, 2) not null default 0,
+  last_order_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(restaurant_id, phone)
+);
+
+-- الفهارس التشغيلية
+create index if not exists idx_categories_rest_sort on public.menu_categories (restaurant_id, sort_order);
+create index if not exists idx_items_rest_cat_sort on public.menu_items (restaurant_id, category_id, sort_order);
+create index if not exists idx_branches_rest on public.branches (restaurant_id);
+create index if not exists idx_delivery_zones_rest on public.delivery_zones (restaurant_id);
+create index if not exists idx_coupons_rest_active on public.coupons (restaurant_id, is_active);
+create index if not exists idx_inventory_movements_rest_created on public.inventory_movements (restaurant_id, created_at desc);
+create index if not exists idx_employees_rest_email on public.employees (restaurant_id, email);
+create index if not exists idx_activity_logs_rest_created on public.activity_logs (restaurant_id, created_at desc);
+create index if not exists idx_notifications_rest_created on public.notifications (restaurant_id, created_at desc);
+create index if not exists idx_ai_logs_rest_ts on public.ai_logs (restaurant_id, timestamp desc);
+create index if not exists idx_customers_rest_phone on public.customers (restaurant_id, phone);
+
 -- 15. دالة ذرية لزيادة عداد الكوبون بأمان
 create or replace function public.increment_coupon_usage(
   p_restaurant_id text,
@@ -253,6 +283,7 @@ alter table public.employees enable row level security;
 alter table public.activity_logs enable row level security;
 alter table public.notifications enable row level security;
 alter table public.ai_logs enable row level security;
+alter table public.customers enable row level security;
 
 -- القراءة العامة للمنيو والبيانات التشغيلية فقط (ممنوع قراءة orders أو employees أو logs للعامة)
 drop policy if exists "Public read restaurants" on public.restaurants;
@@ -339,6 +370,10 @@ drop policy if exists "Admins read ai logs" on public.ai_logs;
 create policy "Admins read ai logs" on public.ai_logs
   for select using (public.is_restaurant_admin(restaurant_id));
 
+drop policy if exists "Admins manage customers" on public.customers;
+create policy "Admins manage customers" on public.customers
+  for all using (public.is_restaurant_admin(restaurant_id)) with check (public.is_restaurant_admin(restaurant_id));
+
 -- حاوية تخزين الصور في Supabase Storage
 insert into storage.buckets (id, name, public)
 values ('restaurant-assets', 'restaurant-assets', true)
@@ -351,3 +386,43 @@ create policy "Public read restaurant assets" on storage.objects
 drop policy if exists "Authenticated upload restaurant assets" on storage.objects;
 create policy "Authenticated upload restaurant assets" on storage.objects
   for insert with check (bucket_id = 'restaurant-assets' and auth.role() = 'authenticated');
+
+drop policy if exists "Authenticated update restaurant assets" on storage.objects;
+create policy "Authenticated update restaurant assets" on storage.objects
+  for update using (bucket_id = 'restaurant-assets' and auth.role() = 'authenticated')
+  with check (bucket_id = 'restaurant-assets' and auth.role() = 'authenticated');
+
+drop policy if exists "Authenticated delete restaurant assets" on storage.objects;
+create policy "Authenticated delete restaurant assets" on storage.objects
+  for delete using (bucket_id = 'restaurant-assets' and auth.role() = 'authenticated');
+
+-- تفعيل المزامنة اللحظية (Supabase Realtime)
+do $$
+declare
+  tbl text;
+  realtime_tables text[] := array[
+    'restaurants',
+    'branches',
+    'menu_categories',
+    'menu_items',
+    'delivery_zones',
+    'coupons',
+    'orders',
+    'inventory_movements',
+    'activity_logs',
+    'notifications',
+    'employees',
+    'customers'
+  ];
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    foreach tbl in array realtime_tables loop
+      begin
+        execute format('alter publication supabase_realtime add table public.%I', tbl);
+      exception
+        when duplicate_object then
+          null;
+      end;
+    end loop;
+  end if;
+end $$;

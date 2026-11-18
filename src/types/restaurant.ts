@@ -447,9 +447,18 @@ export interface ChatChallengeResponse {
   expiresAt?: string;
 }
 
-export interface PublicConfigStatus {
-  ok: boolean;
-  version: string;
+export interface Customer {
+  id: string;
+  restaurantId: string;
+  name: string;
+  phone: string;
+  defaultAddress: string;
+  lastZoneId?: string;
+  ordersCount: number;
+  totalSpent: number;
+  lastOrderAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PublicConfigStatus {

@@ -834,11 +834,115 @@ async function runLiveE2ETests(): Promise<void> {
             })
           ).json()) as {
             bundle: { items: Array<{ id: string; stockQuantity: number }> };
+            customers?: Array<{ phone: string; name: string }>;
           };
           const stockAfterCancel =
             afterCancelOverview.bundle.items.find((i) => i.id === 'item_kebab_kofta_mix')
               ?.stockQuantity ?? 0;
           assert.equal(stockAfterCancel, initialStock);
+          assert.ok(
+            Array.isArray(afterCancelOverview.customers) &&
+              afterCancelOverview.customers.some((c) => c.phone === '01099887766'),
+            'Expected customer profile upserted into admin overview customers list'
+          );
+
+          const singleOrderRes = await fetch(
+            `${BASE_URL}/api/admin/orders/${encodeURIComponent(created.order.id)}`,
+            { headers: { Authorization: `Bearer ${ownerToken}` } }
+          );
+          assert.equal(singleOrderRes.status, 200);
+          const singleOrderData = (await singleOrderRes.json()) as {
+            order: { id: string; status: string };
+          };
+          assert.equal(singleOrderData.order.id, created.order.id);
+          assert.equal(singleOrderData.order.status, 'cancelled');
+        }
+      );
+
+      await runTest(
+        'live admin-to-customer CRUD sync: create item -> public menu -> price update -> delete + auth guard',
+        async () => {
+          const unauthOverview = await fetch(`${BASE_URL}/api/admin/overview`);
+          assert.equal(unauthOverview.status, 401);
+
+          const unauthCreate = await fetch(`${BASE_URL}/api/admin/items`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              categoryId: 'cat_grills',
+              name: 'صنف غير مصرح',
+              price: 100,
+            }),
+          });
+          assert.equal(unauthCreate.status, 401);
+
+          const testItemId = `item_e2e_${Date.now()}`;
+          const createItemRes = await fetch(`${BASE_URL}/api/admin/items`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${ownerToken}`,
+            },
+            body: JSON.stringify({
+              id: testItemId,
+              categoryId: 'cat_grills',
+              name: 'كباب اختبار مزامنة',
+              description: 'صنف اختبار للتحقق من المزامنة الفورية',
+              price: 310,
+              isAvailable: true,
+              stockQuantity: 25,
+            }),
+          });
+          assert.equal(createItemRes.status, 200);
+
+          const publicAfterCreate = (await (
+            await fetch(`${BASE_URL}/api/restaurant`)
+          ).json()) as {
+            bundle: { items: Array<{ id: string; name: string; price: number }> };
+          };
+          const createdInMenu = publicAfterCreate.bundle.items.find((i) => i.id === testItemId);
+          assert.ok(createdInMenu, 'Expected newly created item in public /api/restaurant');
+          assert.equal(createdInMenu.price, 310);
+
+          const updateItemRes = await fetch(`${BASE_URL}/api/admin/items`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${ownerToken}`,
+            },
+            body: JSON.stringify({
+              id: testItemId,
+              categoryId: 'cat_grills',
+              name: 'كباب اختبار مزامنة',
+              description: 'صنف اختبار بعد تعديل السعر',
+              price: 345,
+              isAvailable: true,
+              stockQuantity: 25,
+            }),
+          });
+          assert.equal(updateItemRes.status, 200);
+
+          const publicAfterUpdate = (await (
+            await fetch(`${BASE_URL}/api/restaurant`)
+          ).json()) as {
+            bundle: { items: Array<{ id: string; price: number }> };
+          };
+          const updatedInMenu = publicAfterUpdate.bundle.items.find((i) => i.id === testItemId);
+          assert.equal(updatedInMenu?.price, 345);
+
+          const deleteItemRes = await fetch(`${BASE_URL}/api/admin/items/${testItemId}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${ownerToken}` },
+          });
+          assert.equal(deleteItemRes.status, 200);
+
+          const publicAfterDelete = (await (
+            await fetch(`${BASE_URL}/api/restaurant`)
+          ).json()) as {
+            bundle: { items: Array<{ id: string }> };
+          };
+          const deletedInMenu = publicAfterDelete.bundle.items.find((i) => i.id === testItemId);
+          assert.equal(deletedInMenu, undefined);
         }
       );
     } else {

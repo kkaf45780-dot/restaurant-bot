@@ -124,6 +124,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [notifications, setNotifications] = useState<AdminNotification[]>([]);
   const [configStatus, setConfigStatus] = useState<ServiceConfigStatus | null>(null);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
 
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -137,6 +138,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   const loadOverview = useCallback(
     async (activeToken: string) => {
       try {
+        setOverviewError(null);
         const data = await fetchAdminOverview(activeToken);
         setBundle(data.bundle);
         setHoursStatus(data.hoursStatus);
@@ -150,10 +152,9 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         setConfigStatus(data.configStatus);
         document.title = `لوحة تحكم المدير — ${data.bundle.restaurant.name}`;
       } catch (err) {
-        notify(
-          'error',
-          err instanceof Error ? err.message : 'تعذر تحميل بيانات لوحة التحكم.'
-        );
+        const msg = err instanceof Error ? err.message : 'تعذر تحميل بيانات لوحة التحكم.';
+        setOverviewError(msg);
+        notify('error', msg);
       }
     },
     [notify]
@@ -185,22 +186,75 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   }, [loadOverview]);
 
   useEffect(() => {
-    if (!supabase || !token) return;
-    const channel = supabase
-      .channel('admin-orders-realtime')
-      .on(
+    if (!supabase) return;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        setStoredAdminToken(null);
+        setToken(null);
+      } else if (
+        (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') &&
+        session?.access_token
+      ) {
+        setStoredAdminToken(session.access_token);
+        setToken(session.access_token);
+      }
+    });
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const client = supabase;
+    if (!client || !token) return;
+    const restId = bundle?.restaurant.id;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        void loadOverview(token);
+      }, 250);
+    };
+
+    const channel = client.channel(`admin-sync-${restId || 'default'}`);
+    const restScopedTables = [
+      'orders',
+      'menu_items',
+      'menu_categories',
+      'delivery_zones',
+      'branches',
+      'coupons',
+      'inventory_movements',
+      'notifications',
+      'activity_logs',
+      'employees',
+      'customers',
+    ];
+    for (const table of restScopedTables) {
+      channel.on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'orders' },
-        () => {
-          void loadOverview(token);
-        }
-      )
-      .subscribe();
+        restId
+          ? { event: '*', schema: 'public', table, filter: `restaurant_id=eq.${restId}` }
+          : { event: '*', schema: 'public', table },
+        scheduleReload
+      );
+    }
+    channel.on(
+      'postgres_changes',
+      restId
+        ? { event: '*', schema: 'public', table: 'restaurants', filter: `id=eq.${restId}` }
+        : { event: '*', schema: 'public', table: 'restaurants' },
+      scheduleReload
+    );
+    channel.subscribe();
 
     return () => {
-      void supabase?.removeChannel(channel);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      void client.removeChannel(channel);
     };
-  }, [token, loadOverview]);
+  }, [token, bundle?.restaurant.id, loadOverview]);
 
   useEffect(() => {
     if (!hasPermission(adminRole, activeTab)) {
@@ -258,6 +312,32 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   }
 
   if (!bundle || !hoursStatus || !configStatus) {
+    if (overviewError) {
+      return (
+        <div className="min-h-screen bg-[#F7F3E9] flex items-center justify-center p-6">
+          <div className="bg-white rounded-2xl border border-red-200 p-6 sm:p-8 max-w-md w-full text-center space-y-4">
+            <h1 className="text-lg font-extrabold text-[#18221D]">تعذر تحميل لوحة التحكم</h1>
+            <p className="text-sm text-[#5C6B63]">{overviewError}</p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => void loadOverview(token)}
+                className="min-h-[42px] px-5 rounded-xl bg-[#104B34] hover:bg-[#176B45] text-white text-xs font-bold cursor-pointer"
+              >
+                إعادة المحاولة
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleLogout()}
+                className="min-h-[42px] px-5 rounded-xl bg-[#F7F3E9] hover:bg-[#EFE9DC] text-[#104B34] text-xs font-bold cursor-pointer"
+              >
+                تسجيل الخروج
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-[#F7F3E9] flex items-center justify-center p-6">
         <p className="text-sm font-bold text-[#104B34]">جاري تحميل لوحة التحكم...</p>

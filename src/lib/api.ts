@@ -5,6 +5,7 @@ import type {
   ChatChallengeResponse,
   ChatVerificationPayload,
   Coupon,
+  Customer,
   DeliveryZone,
   Employee,
   EmployeeRole,
@@ -57,6 +58,37 @@ export class ApiError extends Error {
   }
 }
 
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  options?: { retry?: boolean; maxRetries?: number }
+): Promise<Response> {
+  const method = (init?.method || 'GET').toUpperCase();
+  const canRetry = options?.retry ?? method === 'GET';
+  const maxRetries = canRetry ? (options?.maxRetries ?? 2) : 0;
+  const delays = [350, 850];
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(input, init);
+      if (canRetry && (res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, delays[attempt] ?? 850));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, delays[attempt] ?? 850));
+        continue;
+      }
+    }
+  }
+  if (lastError instanceof ApiError) throw lastError;
+  throw new ApiError('تعذر الاتصال بالخادم. تحقق من اتصال الإنترنت وحاول مرة أخرى.', 0);
+}
+
 async function parseJsonOrThrow<T>(res: Response): Promise<T> {
   const data = (await res.json().catch(() => ({}))) as {
     error?: string;
@@ -73,7 +105,7 @@ async function parseJsonOrThrow<T>(res: Response): Promise<T> {
 }
 
 export async function fetchConfigStatus(): Promise<PublicConfigStatus> {
-  const res = await fetch('/api/config/status');
+  const res = await fetchWithRetry('/api/config/status');
   return parseJsonOrThrow<PublicConfigStatus>(res);
 }
 
@@ -82,7 +114,7 @@ export async function fetchRestaurantBundle(slug?: string): Promise<{
   hoursStatus: RestaurantHoursStatus;
 }> {
   const url = slug ? `/api/restaurant/${encodeURIComponent(slug)}` : '/api/restaurant';
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   return parseJsonOrThrow(res);
 }
 
@@ -98,7 +130,7 @@ export async function validateCouponCode(payload: {
   discountAmount: number;
   totals: CalculatedOrderResult;
 }> {
-  const res = await fetch('/api/coupons/validate', {
+  const res = await fetchWithRetry('/api/coupons/validate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -116,7 +148,7 @@ export async function trackOrderByNumber(
     orderNumber,
     token,
   });
-  const res = await fetch(`/api/orders/track?${qs.toString()}`);
+  const res = await fetchWithRetry(`/api/orders/track?${qs.toString()}`);
   return parseJsonOrThrow(res);
 }
 
@@ -127,7 +159,7 @@ export async function submitOrderRating(
   comment: string,
   token?: string
 ): Promise<{ order: Order }> {
-  const res = await fetch(`/api/orders/${encodeURIComponent(orderNumber)}/rate`, {
+  const res = await fetchWithRetry(`/api/orders/${encodeURIComponent(orderNumber)}/rate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ restaurantId, rating, comment, token }),
@@ -136,7 +168,7 @@ export async function submitOrderRating(
 }
 
 export async function fetchChatChallenge(sessionId: string): Promise<ChatChallengeResponse> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `/api/chat/challenge?sessionId=${encodeURIComponent(sessionId)}`
   );
   return parseJsonOrThrow(res);
@@ -160,7 +192,7 @@ export async function sendChatMessage(payload: {
   diff: OrderDraftDiff;
   usedFallback: boolean;
 }> {
-  const res = await fetch('/api/chat', {
+  const res = await fetchWithRetry('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -186,11 +218,15 @@ export async function submitOrder(payload: {
   orderToken?: string;
   deduplicated?: boolean;
 }> {
-  const res = await fetch('/api/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const res = await fetchWithRetry(
+    '/api/orders',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+    { retry: Boolean(payload.idempotencyKey) }
+  );
   return parseJsonOrThrow(res);
 }
 
@@ -228,7 +264,7 @@ export async function fetchAdminMe(token: string): Promise<{
   role?: EmployeeRole;
   permissions?: AdminTabPermission[];
 }> {
-  const res = await fetch('/api/admin/me', {
+  const res = await fetchWithRetry('/api/admin/me', {
     headers: { Authorization: `Bearer ${token}` },
   });
   return parseJsonOrThrow(res);
@@ -247,10 +283,11 @@ export async function fetchAdminOverview(
   employees: Employee[];
   activityLogs: ActivityLog[];
   notifications: AdminNotification[];
+  customers?: Customer[];
   configStatus: ServiceConfigStatus;
 }> {
   const qs = restaurantId ? `?restaurantId=${encodeURIComponent(restaurantId)}` : '';
-  const res = await fetch(`/api/admin/overview${qs}`, {
+  const res = await fetchWithRetry(`/api/admin/overview${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   return parseJsonOrThrow(res);

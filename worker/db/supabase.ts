@@ -73,16 +73,94 @@ export async function insertOrderItemsSupabase(
   if (!order.items.length) return;
   const rows = order.items.map((it) => ({
     order_id: order.id,
+    restaurant_id: order.restaurantId,
     item_id: it.itemId,
     item_name: it.name,
     quantity: it.quantity,
     unit_price: it.unitPrice,
     line_total: it.lineTotal,
+    selected_size_id: it.selectedSizeId ?? null,
     selected_size_label: it.selectedSizeLabel ?? null,
     selected_extras: it.selectedExtras ?? [],
     item_notes: it.itemNotes ?? null,
   }));
-  await supabase.from('order_items').insert(rows);
+  const { error } = await supabase.from('order_items').insert(rows);
+  if (error) {
+    throw new Error(`Failed to persist order_items: ${error.message}`);
+  }
+}
+
+export async function upsertCustomerForOrderSupabase(
+  supabase: SupabaseClient,
+  order: Order
+): Promise<void> {
+  const cleanPhone = order.customerPhone.trim();
+  if (!cleanPhone) return;
+
+  const { data: existing, error: fetchError } = await supabase
+    .from('customers')
+    .select('id, orders_count, total_spent')
+    .eq('restaurant_id', order.restaurantId)
+    .eq('phone', cleanPhone)
+    .maybeSingle();
+
+  if (fetchError) {
+    throw new Error(`Failed to query customer record: ${fetchError.message}`);
+  }
+
+  const nowIso = order.createdAt || new Date().toISOString();
+
+  if (existing) {
+    const { error: updateErr } = await supabase
+      .from('customers')
+      .update({
+        name: order.customerName,
+        default_address: order.customerAddress || '',
+        last_zone_id: order.deliveryZoneId || null,
+        orders_count: Number(existing.orders_count ?? 0) + 1,
+        total_spent: Number(existing.total_spent ?? 0) + Number(order.total ?? 0),
+        last_order_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq('id', existing.id);
+    if (updateErr) {
+      throw new Error(`Failed to update customer record: ${updateErr.message}`);
+    }
+    return;
+  }
+
+  const normalizedDigits = cleanPhone.replace(/[^\d]/g, '') || cleanPhone;
+  const { error: insertErr } = await supabase.from('customers').insert({
+    id: `cust_${order.restaurantId}_${normalizedDigits}`,
+    restaurant_id: order.restaurantId,
+    name: order.customerName,
+    phone: cleanPhone,
+    default_address: order.customerAddress || '',
+    last_zone_id: order.deliveryZoneId || null,
+    orders_count: 1,
+    total_spent: Number(order.total ?? 0),
+    last_order_at: nowIso,
+    created_at: nowIso,
+    updated_at: nowIso,
+  });
+  if (insertErr) {
+    throw new Error(`Failed to insert customer record: ${insertErr.message}`);
+  }
+}
+
+export async function insertOrderNotificationSupabase(
+  supabase: SupabaseClient,
+  order: Order
+): Promise<void> {
+  await supabase.from('notifications').insert({
+    id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    restaurant_id: order.restaurantId,
+    type: 'order',
+    title: `طلب جديد #${order.orderNumber}`,
+    message: `طلب من ${order.customerName} بقيمة ${order.total} ج.م.`,
+    is_read: false,
+    created_at: order.createdAt,
+  });
 }
 
 export async function incrementCouponUsageSupabase(
@@ -90,8 +168,11 @@ export async function incrementCouponUsageSupabase(
   restaurantId: string,
   couponCode: string
 ): Promise<void> {
-  await supabase.rpc('increment_coupon_usage', {
+  const { error } = await supabase.rpc('increment_coupon_usage', {
     p_restaurant_id: restaurantId,
     p_code: couponCode.trim().toUpperCase(),
   });
+  if (error) {
+    throw new Error(`Failed to increment coupon usage: ${error.message}`);
+  }
 }
