@@ -89,12 +89,41 @@ test.describe('Comprehensive Customer + Admin + Responsive E2E Suite', () => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     const server5xx: string[] = [];
+    const unexpectedSameOrigin4xx: string[] = [];
+    const sameOriginFailures: string[] = [];
+    let expectingInvalidCoupon400 = false;
     page.on('console', (m) => {
-      if (m.type() === 'error') consoleErrors.push(m.text());
+      if (m.type() === 'error') {
+        const txt = m.text();
+        if (
+          expectingInvalidCoupon400 &&
+          txt.includes('Failed to load resource: the server responded with a status of 400')
+        ) {
+          return;
+        }
+        // Offline sandbox blocks external Google Fonts CDN (net::ERR_FAILED)
+        if (txt === 'Failed to load resource: net::ERR_FAILED') {
+          return;
+        }
+        consoleErrors.push(txt);
+      }
     });
     page.on('pageerror', (err) => pageErrors.push(err.message));
+    page.on('requestfailed', (req) => {
+      if (req.url().startsWith(BASE_URL)) {
+        sameOriginFailures.push(`${req.url()} (${req.failure()?.errorText || 'failed'})`);
+      }
+    });
     page.on('response', (res) => {
       if (res.status() >= 500) server5xx.push(`${res.status()} ${res.url()}`);
+      if (
+        res.url().startsWith(BASE_URL) &&
+        res.status() >= 400 &&
+        res.status() < 500 &&
+        !(expectingInvalidCoupon400 && res.url().includes('/api/coupons/validate'))
+      ) {
+        unexpectedSameOrigin4xx.push(`${res.status()} ${res.url()}`);
+      }
     });
 
     await page.goto(`${BASE_URL}/menu`);
@@ -112,7 +141,7 @@ test.describe('Comprehensive Customer + Admin + Responsive E2E Suite', () => {
     await customizeBtn.click();
     await expect(page.getByLabel('إغلاق النافذة')).toBeVisible();
     await page.getByLabel('زيادة الكمية').click();
-    await page.getByRole('button', { name: /أضف للسلة/ }).click();
+    await page.getByRole('button', { name: /إضافة إلى السلة/ }).click();
 
     // Cart badge should show items; navigate to checkout
     await page.getByLabel(/السلة \(/).click();
@@ -121,13 +150,15 @@ test.describe('Comprehensive Customer + Admin + Responsive E2E Suite', () => {
     // Invalid coupon should show clean error
     const couponInput = page.getByPlaceholder(/هل لديك كود خصم/);
     await couponInput.fill('INVALID99');
+    expectingInvalidCoupon400 = true;
     await page.getByRole('button', { name: /تطبيق/ }).click();
     await expect(page.getByText(/غير موجود|غير صالح/)).toBeVisible();
+    expectingInvalidCoupon400 = false;
 
     // Valid coupon HARA10
     await couponInput.fill('HARA10');
     await page.getByRole('button', { name: /تطبيق/ }).click();
-    await expect(page.getByText(/تم تطبيق كود HARA10/)).toBeVisible();
+    await expect(page.getByText(/تم تطبيق الكود HARA10/)).toBeVisible();
 
     // Fill checkout form with pickup mode so delivery zone/address isn't a blocker, then verify
     const pickupBtn = page.getByRole('button', { name: /استلام من الفرع/ });
@@ -137,6 +168,8 @@ test.describe('Comprehensive Customer + Admin + Responsive E2E Suite', () => {
     await page.getByPlaceholder('01012345678').fill('01099887766');
 
     await page.getByRole('button', { name: /تأكيد الطلب/ }).click();
+    await expect(page.getByText(/تم استلام طلبك بنجاح/)).toBeVisible({ timeout: 15000 });
+    await page.getByRole('button', { name: /تتبع حالة الطلب الآن/ }).click();
     await page.waitForURL(/\/track\?order=.*&token=/, { timeout: 15000 });
     await expect(page.getByText('تم الاستلام').first()).toBeVisible();
 
@@ -154,6 +187,8 @@ test.describe('Comprehensive Customer + Admin + Responsive E2E Suite', () => {
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
     expect(server5xx).toEqual([]);
+    expect(unexpectedSameOrigin4xx).toEqual([]);
+    expect(sameOriginFailures).toEqual([]);
   });
 
   test('admin flow: login error -> valid login -> menu item CRUD live sync -> delete -> logout', async ({
@@ -174,21 +209,24 @@ test.describe('Comprehensive Customer + Admin + Responsive E2E Suite', () => {
 
     // Open Menu Manager & create a test item
     await page.getByRole('button', { name: /إدارة القائمة/ }).click();
+    await page.getByRole('button', { name: /إضافة منتج جديد/ }).click();
     const dishName = `صنف اختبار E2E ${Date.now()}`;
     await page.getByPlaceholder('مثال: كباب وكفتة مشكل على الفحم').fill(dishName);
     await page.locator('input[type="number"]').first().fill('195');
-    await page.getByRole('button', { name: /إضافة الصنف|حفظ الصنف/ }).click();
+    await page.getByRole('button', { name: /حفظ المنتج/ }).click();
     await expect(page.getByText(dishName).first()).toBeVisible({ timeout: 10000 });
 
     // Verify synced item appears in customer storefront menu
     await page.goto(`${BASE_URL}/menu`);
     await expect(page.getByText(dishName).first()).toBeVisible({ timeout: 10000 });
 
-    // Return to Admin, delete the test item, and logout cleanly
+    // Return to Admin, delete the test item row specifically, and logout cleanly
     await page.goto(`${BASE_URL}/admin`);
     await page.getByRole('button', { name: /إدارة القائمة/ }).click();
-    await expect(page.getByText(dishName).first()).toBeVisible();
-    await page.getByRole('button', { name: /حذف/ }).first().click();
+    const createdRow = page.locator('tr', { hasText: dishName });
+    await expect(createdRow).toBeVisible({ timeout: 10000 });
+    await createdRow.getByRole('button', { name: /حذف/ }).click();
+    await expect(createdRow).toHaveCount(0, { timeout: 10000 });
 
     await page.getByRole('button', { name: /تسجيل الخروج/ }).first().click();
     await expect(page.getByLabel('البريد الإلكتروني للمدير')).toBeVisible({ timeout: 10000 });

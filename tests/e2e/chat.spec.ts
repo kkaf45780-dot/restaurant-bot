@@ -15,7 +15,9 @@ test.describe('Chat Storage Privacy & Security (E2E)', () => {
     await expect(optOutSwitch).toHaveAttribute('aria-checked', 'true');
 
     const chatStoredWhileOptedOut = await page.evaluate(() => {
-      return Object.keys(localStorage).some((k) => k.startsWith('chat_rest_'));
+      return Object.keys(localStorage).some(
+        (k) => k.startsWith('chat_rest_') || k.startsWith('moazzaf_chat_history_v2_')
+      );
     });
     expect(chatStoredWhileOptedOut).toBe(false);
 
@@ -24,23 +26,20 @@ test.describe('Chat Storage Privacy & Security (E2E)', () => {
     await expect(optOutSwitch).toHaveAttribute('aria-checked', 'false');
 
     await page.evaluate(() => {
-      const restKeys = Object.keys(localStorage).filter((k) => k.startsWith('chat_rest_'));
-      const key = restKeys[0] || 'chat_rest_meshweyat_elhara';
-      localStorage.setItem(
-        key,
-        JSON.stringify({
-          messages: [
-            {
-              id: 'old_1',
-              role: 'user',
-              text: 'رسالة قديمة 01012345678',
-              timestamp: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
-            },
-          ],
-          savedAt: Date.now() - 48 * 60 * 60 * 1000,
-          expiresAt: Date.now() - 1000,
-        })
-      );
+      const expiredPayload = JSON.stringify({
+        messages: [
+          {
+            id: 'old_1',
+            role: 'user',
+            text: 'رسالة قديمة 01012345678',
+            timestamp: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+          },
+        ],
+        savedAt: Date.now() - 48 * 60 * 60 * 1000,
+        expiresAt: Date.now() - 1000,
+      });
+      localStorage.setItem('chat_rest_meshweyat_elhara', expiredPayload);
+      localStorage.setItem('moazzaf_chat_history_v2_rest_meshweyat_elhara', expiredPayload);
     });
 
     await page.reload();
@@ -48,6 +47,10 @@ test.describe('Chat Storage Privacy & Security (E2E)', () => {
 
     const oldMsgVisible = await page.getByText('رسالة قديمة').count();
     expect(oldMsgVisible).toBe(0);
+    const legacyStillPresent = await page.evaluate(() =>
+      Boolean(localStorage.getItem('chat_rest_meshweyat_elhara'))
+    );
+    expect(legacyStillPresent).toBe(false);
   });
 
   test('returns real HTTP 404 for unknown routes', async ({ request }) => {

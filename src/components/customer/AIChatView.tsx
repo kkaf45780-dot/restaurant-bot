@@ -221,8 +221,10 @@ export function AIChatView({
               {onToggleChatOptOut && (
                 <button
                   type="button"
+                  role="switch"
+                  aria-checked={chatOptOut}
+                  aria-label="عدم حفظ المحادثة"
                   onClick={() => onToggleChatOptOut(!chatOptOut)}
-                  aria-pressed={chatOptOut}
                   title="عدم حفظ سجل المحادثة محلياً"
                   className={`min-h-[34px] px-2.5 rounded-xl text-[11px] font-bold flex items-center gap-1.5 border cursor-pointer transition-colors ${
                     chatOptOut

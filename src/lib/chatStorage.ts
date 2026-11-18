@@ -40,7 +40,12 @@ export function setChatOptOut(optOut: boolean, restaurantId?: string): void {
     const keysToDelete: string[] = [];
     for (let i = 0; i < storage.length; i++) {
       const k = storage.key(i);
-      if (k && (k.startsWith(CHAT_STORAGE_PREFIX) || k.startsWith(LEGACY_CHAT_PREFIX))) {
+      if (
+        k &&
+        (k.startsWith(CHAT_STORAGE_PREFIX) ||
+          k.startsWith(LEGACY_CHAT_PREFIX) ||
+          k.startsWith('chat_rest_'))
+      ) {
         keysToDelete.push(k);
       }
     }
@@ -53,14 +58,16 @@ export function clearChatHistory(restaurantId: string): void {
   if (!storage) return;
   storage.removeItem(`${CHAT_STORAGE_PREFIX}${restaurantId}`);
   storage.removeItem(`${LEGACY_CHAT_PREFIX}${restaurantId}`);
+  storage.removeItem(`chat_${restaurantId}`);
 }
 
 export function loadChatHistory(restaurantId: string): ChatMessage[] {
   const storage = getStorageSafe();
   if (!storage || getChatOptOut()) return [];
 
-  // Clean up legacy v1 key unconditionally
+  // Clean up legacy v1 and chat_<id> keys unconditionally
   storage.removeItem(`${LEGACY_CHAT_PREFIX}${restaurantId}`);
+  storage.removeItem(`chat_${restaurantId}`);
 
   const raw = storage.getItem(`${CHAT_STORAGE_PREFIX}${restaurantId}`);
   if (!raw) return [];

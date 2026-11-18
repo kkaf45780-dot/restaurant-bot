@@ -20,7 +20,9 @@ import {
   constantTimeEqual,
   verifyPasswordAgainstHash,
 } from './worker/auth.ts';
+import { isKnownSpaRoute, isStaticAssetPath } from './worker/middleware/security.ts';
 import { StoreConflictError } from './src/lib/errors.ts';
+import { escapeCsvCell } from './src/lib/csv.ts';
 import { detectValidImageFromBytes, isSafeMediaUrl } from './src/lib/uploadValidation.ts';
 import { runReceptionistChat } from './src/server/geminiReceptionist.ts';
 import {
@@ -376,11 +378,16 @@ function getPublicConfigStatus(): PublicConfigStatus {
 
 async function startServer(): Promise<void> {
   const app = express();
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '10mb' }));
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+    if (req.path.startsWith('/api/') || req.path.startsWith('/admin')) {
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    }
     if (process.env.NODE_ENV === 'production') {
       res.setHeader('X-Frame-Options', 'DENY');
       res.setHeader(
@@ -414,6 +421,18 @@ async function startServer(): Promise<void> {
 
   app.get('/api/config/status', (_req, res) => {
     res.json(getPublicConfigStatus());
+  });
+
+  // Fail closed in production mode if Supabase backend is required but not configured
+  app.use('/api', (req, res, next) => {
+    if (process.env.REQUIRE_SUPABASE === 'true' && !isSupabaseBackendActive()) {
+      res.status(503).json({
+        error: 'Backend is not configured yet. Please add the Supabase server secret.',
+      });
+      return;
+    }
+    void req;
+    next();
   });
 
   // Public Restaurant Bundle + Computed Hours (Minimized & Exact ID Lookup)
@@ -1750,22 +1769,21 @@ async function startServer(): Promise<void> {
           'التقييم',
           'تاريخ الإنشاء',
         ].join(',');
-        const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
         const rows = orders.map((o) =>
           [
-            escapeCsv(o.orderNumber),
-            escapeCsv(o.customerName),
-            escapeCsv(o.customerPhone),
-            escapeCsv(o.fulfillmentType === 'pickup' ? 'استلام من الفرع' : 'توصيل'),
-            escapeCsv(o.deliveryZoneName || o.branchName || ''),
-            escapeCsv(o.customerAddress),
+            escapeCsvCell(o.orderNumber),
+            escapeCsvCell(o.customerName),
+            escapeCsvCell(o.customerPhone),
+            escapeCsvCell(o.fulfillmentType === 'pickup' ? 'استلام من الفرع' : 'توصيل'),
+            escapeCsvCell(o.deliveryZoneName || o.branchName || ''),
+            escapeCsvCell(o.customerAddress),
             o.subtotal,
             o.discountAmount,
             o.deliveryFee,
             o.total,
-            escapeCsv(o.status),
+            escapeCsvCell(o.status),
             o.rating ? `${o.rating}/5` : '',
-            escapeCsv(o.createdAt),
+            escapeCsvCell(o.createdAt),
           ].join(',')
         );
         const csv = '\uFEFF' + [header, ...rows].join('\n');
@@ -1922,6 +1940,23 @@ async function startServer(): Promise<void> {
 
   const httpServer = http.createServer(app);
 
+  const isDevInternalPath = (pathname: string): boolean =>
+    pathname.startsWith('/@') ||
+    pathname.startsWith('/__') ||
+    pathname.startsWith('/src/') ||
+    pathname.startsWith('/node_modules/') ||
+    pathname.startsWith('/uploads/');
+
+  const sendNotFoundPage = (res: Response, notFoundHtmlPath: string) => {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    if (fs.existsSync(notFoundHtmlPath)) {
+      res.status(404).sendFile(notFoundHtmlPath);
+      return;
+    }
+    res.status(404).type('text/plain; charset=utf-8').send('Not found');
+  };
+
   if (process.env.NODE_ENV !== 'production') {
     const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
@@ -1951,9 +1986,23 @@ async function startServer(): Promise<void> {
         }
       });
     }
+    const devNotFoundPath = path.resolve(process.cwd(), 'public', '404.html');
+    app.use((req, res, next) => {
+      if (
+        (req.method === 'GET' || req.method === 'HEAD') &&
+        !isDevInternalPath(req.path) &&
+        !isStaticAssetPath(req.path) &&
+        !isKnownSpaRoute(req.path)
+      ) {
+        sendNotFoundPage(res, devNotFoundPath);
+        return;
+      }
+      next();
+    });
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
+    const prodNotFoundPath = path.join(distDir, '404.html');
     app.use(
       express.static(distDir, {
         setHeaders: (res, filePath) => {
@@ -1963,7 +2012,11 @@ async function startServer(): Promise<void> {
         },
       })
     );
-    app.get('*', (_req, res) => {
+    app.get('*', (req, res) => {
+      if (isStaticAssetPath(req.path) || !isKnownSpaRoute(req.path)) {
+        sendNotFoundPage(res, prodNotFoundPath);
+        return;
+      }
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distDir, 'index.html'));
     });

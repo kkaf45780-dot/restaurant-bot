@@ -811,6 +811,7 @@ export function MenuManager({
                           type="button"
                           onClick={() => openEditItemForm(item)}
                           title="تعديل"
+                          aria-label={`تعديل ${item.name}`}
                           className="w-8 h-8 rounded-lg border border-[#176B45]/15 hover:bg-[#F7F3E9] text-[#176B45] flex items-center justify-center cursor-pointer"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
@@ -819,6 +820,7 @@ export function MenuManager({
                           type="button"
                           onClick={() => onDeleteItem(item.id)}
                           title="حذف"
+                          aria-label={`حذف ${item.name}`}
                           className="w-8 h-8 rounded-lg border border-red-200 hover:bg-red-50 text-red-600 flex items-center justify-center cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />

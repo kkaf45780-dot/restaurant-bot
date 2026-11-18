@@ -26,10 +26,12 @@ import {
   verifyPasswordAgainstHash,
 } from '../worker/auth.ts';
 import { clearRateLimitMemory } from '../worker/middleware/rate-limit.ts';
+import { escapeCsvCell } from '../src/lib/csv.ts';
 import {
   SECURITY_HEADERS,
   applySecurityHeaders,
   isKnownSpaRoute,
+  isStaticAssetPath,
   resolveAllowedCorsOrigin,
 } from '../worker/middleware/security.ts';
 import { handleAdminLogin } from '../worker/routes/admin-login.ts';
@@ -308,5 +310,19 @@ describe('Security Hardening Suite', () => {
     expect(localStorage.getItem(getChatStorageKey(DEFAULT_RESTAURANT_ID))).not.toBeNull();
     setChatOptOut(DEFAULT_RESTAURANT_ID, true);
     expect(localStorage.getItem(getChatStorageKey(DEFAULT_RESTAURANT_ID))).toBeNull();
+  });
+
+  it('neutralizes CSV formula injection payloads (CWE-1236) and distinguishes static vs unknown routes', () => {
+    expect(escapeCsvCell('=CMD("calc")')).toBe('"\'=CMD(""calc"")"');
+    expect(escapeCsvCell('+201012345678')).toBe('"\'+201012345678"');
+    expect(escapeCsvCell('-1+1')).toBe('"\'-1+1"');
+    expect(escapeCsvCell('@SUM(A1:A2)')).toBe('"\'@SUM(A1:A2)"');
+    expect(escapeCsvCell('\t=IMPORTXML()')).toBe('"\'\t=IMPORTXML()"');
+    expect(escapeCsvCell('أحمد "أبو علي"')).toBe('"أحمد ""أبو علي"""');
+
+    expect(isStaticAssetPath('/assets/index-123.js')).toBe(true);
+    expect(isStaticAssetPath('/manifest.webmanifest')).toBe(true);
+    expect(isStaticAssetPath('/unknown-pentest-route-404')).toBe(false);
+    expect(isKnownSpaRoute('/unknown-pentest-route-404')).toBe(false);
   });
 });

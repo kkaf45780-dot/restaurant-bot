@@ -618,19 +618,21 @@ export async function updateRestaurant(
     return merged;
   }
 
-  const db = readLocalDb();
-  const idx = db.restaurants.findIndex((r) => r.id === restaurantId);
-  const existing = idx >= 0 ? db.restaurants[idx] : db.restaurants[0];
-  const updated: Restaurant = {
-    ...existing,
-    ...patch,
-    id: existing.id,
-    updatedAt: nowIso,
-  };
-  if (idx >= 0) db.restaurants[idx] = updated;
-  else db.restaurants.push(updated);
-  writeLocalDb(db);
-  return updated;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.restaurants.findIndex((r) => r.id === restaurantId);
+    const existing = idx >= 0 ? db.restaurants[idx] : db.restaurants[0];
+    const updated: Restaurant = {
+      ...existing,
+      ...patch,
+      id: existing.id,
+      updatedAt: nowIso,
+    };
+    if (idx >= 0) db.restaurants[idx] = updated;
+    else db.restaurants.push(updated);
+    writeLocalDb(db);
+    return updated;
+  });
 }
 
 export async function upsertCategory(category: MenuCategory): Promise<MenuCategory> {
@@ -649,12 +651,14 @@ export async function upsertCategory(category: MenuCategory): Promise<MenuCatego
     return category;
   }
 
-  const db = readLocalDb();
-  const idx = db.categories.findIndex((c) => c.id === category.id);
-  if (idx >= 0) db.categories[idx] = category;
-  else db.categories.push(category);
-  writeLocalDb(db);
-  return category;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.categories.findIndex((c) => c.id === category.id);
+    if (idx >= 0) db.categories[idx] = category;
+    else db.categories.push(category);
+    writeLocalDb(db);
+    return category;
+  });
 }
 
 export async function deleteCategory(restaurantId: string, categoryId: string): Promise<void> {
@@ -671,14 +675,16 @@ export async function deleteCategory(restaurantId: string, categoryId: string): 
     return;
   }
 
-  const db = readLocalDb();
-  db.categories = db.categories.filter(
-    (c) => !(c.id === categoryId && c.restaurantId === restaurantId)
-  );
-  db.items = db.items.filter(
-    (i) => !(i.categoryId === categoryId && i.restaurantId === restaurantId)
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.categories = db.categories.filter(
+      (c) => !(c.id === categoryId && c.restaurantId === restaurantId)
+    );
+    db.items = db.items.filter(
+      (i) => !(i.categoryId === categoryId && i.restaurantId === restaurantId)
+    );
+    writeLocalDb(db);
+  });
 }
 
 export async function upsertMenuItem(item: MenuItem): Promise<MenuItem> {
@@ -706,12 +712,14 @@ export async function upsertMenuItem(item: MenuItem): Promise<MenuItem> {
     return item;
   }
 
-  const db = readLocalDb();
-  const idx = db.items.findIndex((i) => i.id === item.id);
-  if (idx >= 0) db.items[idx] = item;
-  else db.items.push(item);
-  writeLocalDb(db);
-  return item;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.items.findIndex((i) => i.id === item.id);
+    if (idx >= 0) db.items[idx] = item;
+    else db.items.push(item);
+    writeLocalDb(db);
+    return item;
+  });
 }
 
 export async function reorderMenuItems(
@@ -736,14 +744,16 @@ export async function reorderMenuItems(
     return;
   }
 
-  const db = readLocalDb();
-  const orderMap = new Map(orderedIds.map((id, idx) => [id, idx + 1]));
-  db.items = db.items.map((item) =>
-    item.restaurantId === restaurantId && orderMap.has(item.id)
-      ? { ...item, sortOrder: orderMap.get(item.id)! }
-      : item
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const orderMap = new Map(orderedIds.map((id, idx) => [id, idx + 1]));
+    db.items = db.items.map((item) =>
+      item.restaurantId === restaurantId && orderMap.has(item.id)
+        ? { ...item, sortOrder: orderMap.get(item.id)! }
+        : item
+    );
+    writeLocalDb(db);
+  });
 }
 
 export async function deleteMenuItem(restaurantId: string, itemId: string): Promise<void> {
@@ -760,9 +770,11 @@ export async function deleteMenuItem(restaurantId: string, itemId: string): Prom
     return;
   }
 
-  const db = readLocalDb();
-  db.items = db.items.filter((i) => !(i.id === itemId && i.restaurantId === restaurantId));
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.items = db.items.filter((i) => !(i.id === itemId && i.restaurantId === restaurantId));
+    writeLocalDb(db);
+  });
 }
 
 export async function upsertDeliveryZone(zone: DeliveryZone): Promise<DeliveryZone> {
@@ -783,12 +795,14 @@ export async function upsertDeliveryZone(zone: DeliveryZone): Promise<DeliveryZo
     return zone;
   }
 
-  const db = readLocalDb();
-  const idx = db.deliveryZones.findIndex((z) => z.id === zone.id);
-  if (idx >= 0) db.deliveryZones[idx] = zone;
-  else db.deliveryZones.push(zone);
-  writeLocalDb(db);
-  return zone;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.deliveryZones.findIndex((z) => z.id === zone.id);
+    if (idx >= 0) db.deliveryZones[idx] = zone;
+    else db.deliveryZones.push(zone);
+    writeLocalDb(db);
+    return zone;
+  });
 }
 
 export async function deleteDeliveryZone(restaurantId: string, zoneId: string): Promise<void> {
@@ -805,11 +819,13 @@ export async function deleteDeliveryZone(restaurantId: string, zoneId: string): 
     return;
   }
 
-  const db = readLocalDb();
-  db.deliveryZones = db.deliveryZones.filter(
-    (z) => !(z.id === zoneId && z.restaurantId === restaurantId)
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.deliveryZones = db.deliveryZones.filter(
+      (z) => !(z.id === zoneId && z.restaurantId === restaurantId)
+    );
+    writeLocalDb(db);
+  });
 }
 
 // Branches CRUD
@@ -831,12 +847,14 @@ export async function upsertBranch(branch: RestaurantBranch): Promise<Restaurant
     return branch;
   }
 
-  const db = readLocalDb();
-  const idx = db.branches.findIndex((b) => b.id === branch.id);
-  if (idx >= 0) db.branches[idx] = branch;
-  else db.branches.push(branch);
-  writeLocalDb(db);
-  return branch;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.branches.findIndex((b) => b.id === branch.id);
+    if (idx >= 0) db.branches[idx] = branch;
+    else db.branches.push(branch);
+    writeLocalDb(db);
+    return branch;
+  });
 }
 
 export async function deleteBranch(restaurantId: string, branchId: string): Promise<void> {
@@ -853,11 +871,13 @@ export async function deleteBranch(restaurantId: string, branchId: string): Prom
     return;
   }
 
-  const db = readLocalDb();
-  db.branches = db.branches.filter(
-    (b) => !(b.id === branchId && b.restaurantId === restaurantId)
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.branches = db.branches.filter(
+      (b) => !(b.id === branchId && b.restaurantId === restaurantId)
+    );
+    writeLocalDb(db);
+  });
 }
 
 // Coupons CRUD
@@ -921,12 +941,14 @@ export async function upsertCoupon(coupon: Coupon): Promise<Coupon> {
     return normalized;
   }
 
-  const db = readLocalDb();
-  const idx = db.coupons.findIndex((c) => c.id === normalized.id);
-  if (idx >= 0) db.coupons[idx] = normalized;
-  else db.coupons.unshift(normalized);
-  writeLocalDb(db);
-  return normalized;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.coupons.findIndex((c) => c.id === normalized.id);
+    if (idx >= 0) db.coupons[idx] = normalized;
+    else db.coupons.unshift(normalized);
+    writeLocalDb(db);
+    return normalized;
+  });
 }
 
 export async function deleteCoupon(restaurantId: string, couponId: string): Promise<void> {
@@ -943,11 +965,13 @@ export async function deleteCoupon(restaurantId: string, couponId: string): Prom
     return;
   }
 
-  const db = readLocalDb();
-  db.coupons = db.coupons.filter(
-    (c) => !(c.id === couponId && c.restaurantId === restaurantId)
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.coupons = db.coupons.filter(
+      (c) => !(c.id === couponId && c.restaurantId === restaurantId)
+    );
+    writeLocalDb(db);
+  });
 }
 
 export async function incrementCouponUsage(
@@ -1874,22 +1898,24 @@ export async function updateOrderPaymentStatus(
     return updatedOrder;
   }
 
-  const db = readLocalDb();
-  const idx = db.orders.findIndex((o) => o.id === orderId && o.restaurantId === restaurantId);
-  if (idx < 0) return null;
-  const updatedOrder: Order = { ...db.orders[idx], paymentStatus, updatedAt: nowIso };
-  db.orders[idx] = updatedOrder;
-  db.activityLogs.unshift({
-    id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-    restaurantId,
-    actorName,
-    action: `تحديث حالة الدفع للطلب #${updatedOrder.orderNumber}`,
-    details: paymentStatus === 'paid' ? 'تم تأكيد الدفع' : 'تمت إعادة الحالة إلى غير مدفوع',
-    createdAt: nowIso,
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.orders.findIndex((o) => o.id === orderId && o.restaurantId === restaurantId);
+    if (idx < 0) return null;
+    const updatedOrder: Order = { ...db.orders[idx], paymentStatus, updatedAt: nowIso };
+    db.orders[idx] = updatedOrder;
+    db.activityLogs.unshift({
+      id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      restaurantId,
+      actorName,
+      action: `تحديث حالة الدفع للطلب #${updatedOrder.orderNumber}`,
+      details: paymentStatus === 'paid' ? 'تم تأكيد الدفع' : 'تمت إعادة الحالة إلى غير مدفوع',
+      createdAt: nowIso,
+    });
+    db.activityLogs = db.activityLogs.slice(0, 100);
+    writeLocalDb(db);
+    return updatedOrder;
   });
-  db.activityLogs = db.activityLogs.slice(0, 100);
-  writeLocalDb(db);
-  return updatedOrder;
 }
 
 export async function rateOrderByToken(
@@ -1940,33 +1966,33 @@ export async function rateOrderByToken(
     };
   }
 
-  const db = readLocalDb();
-  const idx = db.orders.findIndex(
-    (o) =>
-      o.restaurantId === restaurantId &&
-      ((cleanToken && o.orderToken === cleanToken) ||
-        (cleanOrderNumber && (o.orderNumber === cleanOrderNumber || o.id === cleanOrderNumber)))
-  );
-  target = idx >= 0 ? db.orders[idx] : null;
-  if (!target) return null;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.orders.findIndex(
+      (o) =>
+        o.restaurantId === restaurantId &&
+        ((cleanToken && o.orderToken === cleanToken) ||
+          (cleanOrderNumber && (o.orderNumber === cleanOrderNumber || o.id === cleanOrderNumber)))
+    );
+    const localTarget = idx >= 0 ? db.orders[idx] : null;
+    if (!localTarget) return null;
 
-  if (target.status !== 'delivered') {
-    throw new Error('يمكن تقييم الطلب فقط بعد تمام التوصيل.');
-  }
+    if (localTarget.status !== 'delivered') {
+      throw new Error('يمكن تقييم الطلب فقط بعد تمام التوصيل.');
+    }
 
-  const nowIso = new Date().toISOString();
-  const updated: Order = {
-    ...target,
-    rating,
-    ratingComment: comment.trim() || undefined,
-    ratedAt: nowIso,
-    updatedAt: nowIso,
-  };
-  if (idx >= 0) {
+    const nowIso = new Date().toISOString();
+    const updated: Order = {
+      ...localTarget,
+      rating,
+      ratingComment: comment.trim() || undefined,
+      ratedAt: nowIso,
+      updatedAt: nowIso,
+    };
     db.orders[idx] = updated;
     writeLocalDb(db);
-  }
-  return updated;
+    return updated;
+  });
 }
 
 export async function rateOrder(
@@ -2185,30 +2211,32 @@ export async function upsertEmployee(
     };
   }
 
-  const db = readLocalDb();
-  const idx = db.employees.findIndex((e) => e.id === emp.id);
-  const existing = idx >= 0 ? db.employees[idx] : null;
-  const effectiveMustChange =
-    typeof emp.password === 'string' && emp.password.trim().length > 0
-      ? (emp.mustChangePassword ?? true)
-      : (emp.mustChangePassword ?? existing?.mustChangePassword ?? true);
-  const toSave: Employee = {
-    id: emp.id,
-    restaurantId: emp.restaurantId,
-    name: emp.name,
-    email: emp.email.trim().toLowerCase(),
-    phone: emp.phone ?? '',
-    role: emp.role,
-    isActive: emp.isActive,
-    passwordHash: newPasswordHash ?? existing?.passwordHash,
-    mustChangePassword: effectiveMustChange,
-    createdAt: emp.createdAt,
-  };
-  if (idx >= 0) db.employees[idx] = toSave;
-  else db.employees.unshift(toSave);
-  writeLocalDb(db);
-  const { passwordHash: _omitted, ...safe } = toSave;
-  return safe;
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    const idx = db.employees.findIndex((e) => e.id === emp.id);
+    const existing = idx >= 0 ? db.employees[idx] : null;
+    const effectiveMustChange =
+      typeof emp.password === 'string' && emp.password.trim().length > 0
+        ? (emp.mustChangePassword ?? true)
+        : (emp.mustChangePassword ?? existing?.mustChangePassword ?? true);
+    const toSave: Employee = {
+      id: emp.id,
+      restaurantId: emp.restaurantId,
+      name: emp.name,
+      email: emp.email.trim().toLowerCase(),
+      phone: emp.phone ?? '',
+      role: emp.role,
+      isActive: emp.isActive,
+      passwordHash: newPasswordHash ?? existing?.passwordHash,
+      mustChangePassword: effectiveMustChange,
+      createdAt: emp.createdAt,
+    };
+    if (idx >= 0) db.employees[idx] = toSave;
+    else db.employees.unshift(toSave);
+    writeLocalDb(db);
+    const { passwordHash: _omitted, ...safe } = toSave;
+    return safe;
+  });
 }
 
 export async function getEmployeeAuthState(
@@ -2321,11 +2349,13 @@ export async function deleteEmployee(restaurantId: string, employeeId: string): 
     return;
   }
 
-  const db = readLocalDb();
-  db.employees = db.employees.filter(
-    (e) => !(e.id === employeeId && e.restaurantId === restaurantId)
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.employees = db.employees.filter(
+      (e) => !(e.id === employeeId && e.restaurantId === restaurantId)
+    );
+    writeLocalDb(db);
+  });
 }
 
 // Activity Logs & Notifications
@@ -2346,10 +2376,12 @@ export async function appendActivityLog(entry: ActivityLog): Promise<void> {
     return;
   }
 
-  const db = readLocalDb();
-  db.activityLogs.unshift(entry);
-  db.activityLogs = db.activityLogs.slice(0, 120);
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.activityLogs.unshift(entry);
+    db.activityLogs = db.activityLogs.slice(0, 120);
+    writeLocalDb(db);
+  });
 }
 
 export async function listActivityLogs(restaurantId: string): Promise<ActivityLog[]> {
@@ -2419,11 +2451,13 @@ export async function markNotificationsRead(restaurantId: string): Promise<void>
     return;
   }
 
-  const db = readLocalDb();
-  db.notifications = db.notifications.map((n) =>
-    n.restaurantId === restaurantId ? { ...n, isRead: true } : n
-  );
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.notifications = db.notifications.map((n) =>
+      n.restaurantId === restaurantId ? { ...n, isRead: true } : n
+    );
+    writeLocalDb(db);
+  });
 }
 
 // AI Logs
@@ -2447,10 +2481,12 @@ export async function appendAiLog(entry: AILogEntry): Promise<void> {
     }
   }
 
-  const db = readLocalDb();
-  db.aiLogs.unshift(entry);
-  db.aiLogs = db.aiLogs.slice(0, 50);
-  writeLocalDb(db);
+  return withLocalDbLock(() => {
+    const db = readLocalDb();
+    db.aiLogs.unshift(entry);
+    db.aiLogs = db.aiLogs.slice(0, 50);
+    writeLocalDb(db);
+  });
 }
 
 export async function listAiLogs(restaurantId: string): Promise<AILogEntry[]> {

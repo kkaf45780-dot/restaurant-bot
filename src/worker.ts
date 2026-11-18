@@ -20,6 +20,7 @@ import {
   isStaticAssetPath,
 } from '../worker/middleware/security.ts';
 import { StoreConflictError } from './lib/errors.ts';
+import { escapeCsvCell } from './lib/csv.ts';
 import {
   decodeBase64ToBytes,
   detectValidImageFromBytes,
@@ -1929,22 +1930,21 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           'التقييم',
           'تاريخ الإنشاء',
         ].join(',');
-        const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
         const rows = orders.map((o) =>
           [
-            escapeCsv(o.orderNumber),
-            escapeCsv(o.customerName),
-            escapeCsv(o.customerPhone),
-            escapeCsv(o.fulfillmentType === 'pickup' ? 'استلام من الفرع' : 'توصيل'),
-            escapeCsv(o.deliveryZoneName || o.branchName || ''),
-            escapeCsv(o.customerAddress),
+            escapeCsvCell(o.orderNumber),
+            escapeCsvCell(o.customerName),
+            escapeCsvCell(o.customerPhone),
+            escapeCsvCell(o.fulfillmentType === 'pickup' ? 'استلام من الفرع' : 'توصيل'),
+            escapeCsvCell(o.deliveryZoneName || o.branchName || ''),
+            escapeCsvCell(o.customerAddress),
             o.subtotal,
             o.discountAmount,
             o.deliveryFee,
             o.total,
-            escapeCsv(o.status),
+            escapeCsvCell(o.status),
             o.rating ? `${o.rating}/5` : '',
-            escapeCsv(o.createdAt),
+            escapeCsvCell(o.createdAt),
           ].join(',')
         );
         const csv = '\uFEFF' + [header, ...rows].join('\n');
