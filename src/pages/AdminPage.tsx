@@ -30,6 +30,7 @@ import {
   adminDeleteEmployee,
   adminDeleteMenuItem,
   adminDownloadOrdersCsv,
+  adminLogout,
   adminMarkNotificationsRead,
   adminReorderItems,
   adminUpdateOrderPaymentStatus,
@@ -188,14 +189,14 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
         const data = await fetchAdminOverview(activeToken);
         setBundle(data.bundle);
         setHoursStatus(data.hoursStatus);
-        setOrders(data.orders);
-        setAiLogs(data.aiLogs);
-        setCoupons(data.coupons);
-        setInventoryMovements(data.inventoryMovements);
-        setEmployees(data.employees);
-        setActivityLogs(data.activityLogs);
-        setNotifications(data.notifications);
-        setConfigStatus(data.configStatus);
+        setOrders(data.orders ?? []);
+        setAiLogs(data.aiLogs ?? []);
+        setCoupons(data.coupons ?? []);
+        setInventoryMovements(data.inventoryMovements ?? []);
+        setEmployees(data.employees ?? []);
+        setActivityLogs(data.activityLogs ?? []);
+        setNotifications(data.notifications ?? []);
+        setConfigStatus(data.configStatus ?? null);
         document.title = `لوحة تحكم المدير — ${data.bundle.restaurant.name}`;
       } catch (err) {
         if (err instanceof ApiError && err.mustChangePassword) {
@@ -360,6 +361,10 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
   };
 
   const handleLogout = async () => {
+    const activeToken = token;
+    if (activeToken) {
+      await adminLogout(activeToken).catch(() => {});
+    }
     setStoredAdminToken(null);
     setToken(null);
     setMustChangePassword(false);
@@ -516,7 +521,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
     );
   }
 
-  if (!bundle || !hoursStatus || !configStatus) {
+  if (!bundle || !hoursStatus) {
     if (overviewError) {
       return (
         <div className="min-h-screen bg-[#F7F3E9] flex items-center justify-center p-6">
@@ -1122,7 +1127,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
               />
             )}
 
-            {activeTab === 'ai' && (
+            {activeTab === 'ai' && configStatus && (
               <AISettingsSection
                 restaurant={bundle.restaurant}
                 aiLogs={aiLogs}
@@ -1131,7 +1136,7 @@ export function AdminPage({ onNavigateCustomer }: AdminPageProps) {
               />
             )}
 
-            {activeTab === 'system' && (
+            {activeTab === 'system' && configStatus && (
               <SystemSettingsSection
                 token={token}
                 restaurant={bundle.restaurant}

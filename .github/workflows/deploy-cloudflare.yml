@@ -19,8 +19,16 @@ jobs:
         run: npm install
       - name: Type-check
         run: npm run lint
-      - name: Build
+      - name: Unit & Worker Tests (Vitest)
+        run: npx vitest run
+      - name: API & Security E2E + Concurrency Tests
+        run: npx tsx tests/e2e.test.ts && npx tsx tests/integration-concurrency.test.ts
+      - name: Build Frontend
         run: npm run build
+      - name: Verify Cloudflare Worker Bundle
+        run: npx esbuild src/worker.ts --bundle --format=esm --platform=browser --main-fields=module,main --conditions=workerd,worker,browser --external:node:* --external:crypto --outfile=/tmp/worker-check.js && rm -f /tmp/worker-check.js
+      - name: Audit Production Dependencies
+        run: npm i --package-lock-only --ignore-scripts && npm audit --omit=dev --audit-level=high && rm -f package-lock.json
 
   deploy:
     if: github.event_name == 'workflow_dispatch' || vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'

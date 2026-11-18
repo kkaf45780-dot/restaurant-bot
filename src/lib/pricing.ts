@@ -34,7 +34,10 @@ export function buildDraftLineKey(entry: {
   selectedExtraIds?: string[];
   itemNotes?: string;
 }): string {
-  const extrasPart = [...(entry.selectedExtraIds ?? [])].sort().join(',');
+  const extrasPart = Array.from(new Set(entry.selectedExtraIds ?? []))
+    .filter((id) => typeof id === 'string' && id.trim().length > 0)
+    .sort()
+    .join(',');
   const notePart = (entry.itemNotes ?? '').trim();
   return `${entry.itemId}__${entry.selectedSizeId ?? 'default'}__${extrasPart}__${notePart}`;
 }
@@ -77,6 +80,19 @@ export function evaluateCoupon(
     };
   }
 
+  if (
+    !Number.isFinite(coupon.discountValue) ||
+    coupon.discountValue <= 0 ||
+    (coupon.discountType === 'percentage' && coupon.discountValue > 100)
+  ) {
+    return {
+      valid: false,
+      coupon,
+      discountAmount: 0,
+      errorMessage: 'إعدادات كود الخصم غير صالحة.',
+    };
+  }
+
   const todayStr = new Date().toISOString().slice(0, 10);
   if (coupon.validFrom && todayStr < coupon.validFrom) {
     return {
@@ -106,7 +122,7 @@ export function evaluateCoupon(
     };
   }
 
-  const minPiasters = toPiasters(coupon.minOrderAmount || 0);
+  const minPiasters = toPiasters(Math.max(0, coupon.minOrderAmount || 0));
   if (subtotalPiasters < minPiasters) {
     return {
       valid: false,
@@ -195,23 +211,48 @@ export function calculateOrderTotals(
 
   const fulfillmentType: FulfillmentType = options?.fulfillmentType ?? 'delivery';
 
-  // Merge entries with identical lineKey (itemId + size + extras + note)
+  // Canonicalize lineKey (never trust caller-supplied lineKey) & deduplicate extras
   const mergedLines = new Map<string, OrderDraftItem>();
   for (const entry of draftItems) {
-    const qty = Math.floor(Number(entry.quantity) || 0);
-    if (qty <= 0) continue;
-    const key = entry.lineKey || buildDraftLineKey(entry);
+    const rawNum = Number(entry?.quantity);
+    if (!Number.isFinite(rawNum)) continue;
+    const qty = Math.floor(rawNum);
+    if (qty <= 0 || qty > 500) continue;
+    const dedupExtras = Array.from(new Set(entry.selectedExtraIds ?? [])).filter(
+      (id) => typeof id === 'string' && id.trim().length > 0
+    );
+    const key = buildDraftLineKey({
+      itemId: entry.itemId,
+      selectedSizeId: entry.selectedSizeId,
+      selectedExtraIds: dedupExtras,
+      itemNotes: entry.itemNotes,
+    });
     const existing = mergedLines.get(key);
     if (existing) {
-      existing.quantity += qty;
+      existing.quantity = Math.min(500, existing.quantity + qty);
     } else {
-      mergedLines.set(key, { ...entry, lineKey: key, quantity: qty });
+      mergedLines.set(key, {
+        itemId: entry.itemId,
+        selectedSizeId: entry.selectedSizeId,
+        selectedExtraIds: dedupExtras,
+        itemNotes: entry.itemNotes,
+        lineKey: key,
+        quantity: qty,
+      });
     }
+  }
+
+  // Aggregate total requested quantity per catalog item across ALL variants/sizes/notes
+  const totalQtyByItemId = new Map<string, number>();
+  for (const entry of mergedLines.values()) {
+    totalQtyByItemId.set(entry.itemId, (totalQtyByItemId.get(entry.itemId) ?? 0) + entry.quantity);
   }
 
   const validItems: OrderItem[] = [];
   const unavailableItemNames: string[] = [];
   const outOfStockItemNames: string[] = [];
+  const seenUnavailableIds = new Set<string>();
+  const seenOutOfStockIds = new Set<string>();
   const unknownItemIds: string[] = [];
   let subtotalPiasters = 0;
 
@@ -222,14 +263,20 @@ export function calculateOrderTotals(
       continue;
     }
     if (!catalogItem.isAvailable) {
-      unavailableItemNames.push(catalogItem.name);
+      if (!seenUnavailableIds.has(catalogItem.id)) {
+        seenUnavailableIds.add(catalogItem.id);
+        unavailableItemNames.push(catalogItem.name);
+      }
       continue;
     }
+    const aggregatedQty = totalQtyByItemId.get(entry.itemId) ?? entry.quantity;
     if (
       typeof catalogItem.stockQuantity === 'number' &&
       catalogItem.stockQuantity >= 0 &&
-      catalogItem.stockQuantity < entry.quantity
+      catalogItem.stockQuantity < aggregatedQty &&
+      !seenOutOfStockIds.has(catalogItem.id)
     ) {
+      seenOutOfStockIds.add(catalogItem.id);
       outOfStockItemNames.push(`${catalogItem.name} (المتوفر: ${catalogItem.stockQuantity})`);
     }
 

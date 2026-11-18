@@ -17,9 +17,11 @@ import { calculateOrderTotals } from './src/lib/pricing.ts';
 import { buildWhatsAppOrderUrl } from './src/lib/whatsapp.ts';
 import {
   COMPROMISED_DEFAULT_PASSWORDS,
+  constantTimeEqual,
   verifyPasswordAgainstHash,
 } from './worker/auth.ts';
-import { detectValidImageFromBytes } from './src/lib/uploadValidation.ts';
+import { StoreConflictError } from './src/lib/errors.ts';
+import { detectValidImageFromBytes, isSafeMediaUrl } from './src/lib/uploadValidation.ts';
 import { runReceptionistChat } from './src/server/geminiReceptionist.ts';
 import {
   checkSlidingRateLimit,
@@ -50,8 +52,10 @@ import {
   findOrderByIdempotencyKey,
   findOrderByNumberOrId,
   findRestaurantBundle,
+  getEmployeeAuthState,
+  getOwnerPasswordChangedAt,
   getRestaurantBundle,
-  incrementCouponUsage,
+  isAdminTokenRevoked,
   isSupabaseBackendActive,
   listActivityLogs,
   listAiLogs,
@@ -65,7 +69,9 @@ import {
   probeBackendHealth,
   rateOrder,
   reorderMenuItems,
+  revokeAdminToken,
   setLocalAdminPassword,
+  submitOrderAtomic,
   updateEmployeePassword,
   updateOrderPaymentStatus,
   updateOrderStatus,
@@ -130,6 +136,9 @@ interface AdminRequest extends Request {
   adminRestaurantId?: string;
   adminMustChangePassword?: boolean;
   adminAuthType?: 'local' | 'supabase';
+  adminTokenJti?: string;
+  adminTokenExp?: number;
+  adminTokenIat?: number;
 }
 
 const VALID_ROLES: EmployeeRole[] = ['owner', 'manager', 'cashier', 'kitchen'];
@@ -138,7 +147,8 @@ function signLocalAdminToken(
   email: string,
   role: EmployeeRole = 'owner',
   restaurantId: string = DEFAULT_RESTAURANT_ID,
-  mustChangePassword = false
+  mustChangePassword = false,
+  issuedAtMs: number = Date.now()
 ): string {
   const payload = Buffer.from(
     JSON.stringify({
@@ -146,7 +156,9 @@ function signLocalAdminToken(
       role,
       restaurantId,
       mustChangePassword,
-      exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
+      jti: crypto.randomUUID(),
+      iat: issuedAtMs,
+      exp: issuedAtMs + 1000 * 60 * 60 * 24 * 7,
     })
   ).toString('base64url');
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
@@ -158,6 +170,9 @@ function verifyLocalAdminToken(token: string): {
   role: EmployeeRole;
   restaurantId: string;
   mustChangePassword: boolean;
+  jti: string;
+  iat: number;
+  exp: number;
 } | null {
   if (!token.startsWith('local.')) return null;
   const parts = token.split('.');
@@ -167,13 +182,15 @@ function verifyLocalAdminToken(token: string): {
     .createHmac('sha256', SESSION_SECRET)
     .update(payload)
     .digest('base64url');
-  if (sig !== expectedSig) return null;
+  if (!constantTimeEqual(sig, expectedSig)) return null;
   try {
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
       email: string;
       role?: EmployeeRole;
       restaurantId?: string;
       mustChangePassword?: boolean;
+      jti?: string;
+      iat?: number;
       exp: number;
     };
     if (decoded.exp < Date.now()) return null;
@@ -184,6 +201,9 @@ function verifyLocalAdminToken(token: string): {
       role,
       restaurantId: String(decoded.restaurantId || DEFAULT_RESTAURANT_ID),
       mustChangePassword: Boolean(decoded.mustChangePassword),
+      jti: typeof decoded.jti === 'string' ? decoded.jti : '',
+      iat: Number(decoded.iat || 0),
+      exp: Number(decoded.exp),
     };
   } catch {
     return null;
@@ -263,10 +283,39 @@ async function verifyAdminRequest(
 
   const localAdmin = verifyLocalAdminToken(token);
   if (localAdmin) {
+    if (await isAdminTokenRevoked(localAdmin.jti)) {
+      res.status(401).json({ error: 'تم إنهاء الجلسة. يُرجى تسجيل الدخول مرة أخرى.' });
+      return;
+    }
+
+    const expectedOwnerEmail = (process.env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
+    let resolvedRole = localAdmin.role;
+    if (localAdmin.email.toLowerCase() === expectedOwnerEmail && localAdmin.role === 'owner') {
+      const ownerChangedAt = await getOwnerPasswordChangedAt();
+      if (ownerChangedAt && localAdmin.iat < ownerChangedAt) {
+        res.status(401).json({ error: 'تم تغيير كلمة المرور. يُرجى إعادة تسجيل الدخول.' });
+        return;
+      }
+    } else {
+      const empState = await getEmployeeAuthState(localAdmin.restaurantId, localAdmin.email);
+      if (!empState.exists || !empState.isActive) {
+        res.status(401).json({ error: 'تم تعطيل هذا الحساب أو حذفه.' });
+        return;
+      }
+      if (empState.passwordChangedAt && localAdmin.iat < empState.passwordChangedAt) {
+        res.status(401).json({ error: 'تم تغيير كلمة المرور. يُرجى إعادة تسجيل الدخول.' });
+        return;
+      }
+      if (empState.role) {
+        resolvedRole = empState.role;
+      }
+    }
+
     if (
       localAdmin.mustChangePassword &&
       req.path !== '/api/admin/me' &&
-      req.path !== '/api/admin/password'
+      req.path !== '/api/admin/password' &&
+      req.path !== '/api/admin/logout'
     ) {
       res.status(403).json({
         error: 'يجب تغيير كلمة المرور المؤقتة قبل استخدام لوحة التحكم.',
@@ -275,10 +324,13 @@ async function verifyAdminRequest(
       return;
     }
     (req as AdminRequest).adminEmail = localAdmin.email;
-    (req as AdminRequest).adminRole = localAdmin.role;
+    (req as AdminRequest).adminRole = resolvedRole;
     (req as AdminRequest).adminRestaurantId = localAdmin.restaurantId;
     (req as AdminRequest).adminMustChangePassword = localAdmin.mustChangePassword;
     (req as AdminRequest).adminAuthType = 'local';
+    (req as AdminRequest).adminTokenJti = localAdmin.jti;
+    (req as AdminRequest).adminTokenExp = localAdmin.exp;
+    (req as AdminRequest).adminTokenIat = localAdmin.iat;
     next();
     return;
   }
@@ -808,13 +860,13 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      if (!customerName || !String(customerName).trim()) {
-        res.status(400).json({ error: 'يُرجى إدخال اسم العميل.' });
+      if (!customerName || !String(customerName).trim() || String(customerName).trim().length > 120) {
+        res.status(400).json({ error: 'يُرجى إدخال اسم العميل (بحد أقصى 120 حرفاً).' });
         return;
       }
 
       const cleanPhone = String(customerPhone || '').trim();
-      if (!cleanPhone || cleanPhone.replace(/[^\d]/g, '').length < 8) {
+      if (!cleanPhone || cleanPhone.replace(/[^\d]/g, '').length < 8 || cleanPhone.length > 30) {
         res.status(400).json({ error: 'يُرجى إدخال رقم هاتف صحيح للتواصل.' });
         return;
       }
@@ -822,8 +874,16 @@ async function startServer(): Promise<void> {
       const cleanFulfillment: FulfillmentType =
         fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
 
-      if (cleanFulfillment === 'delivery' && (!customerAddress || !String(customerAddress).trim())) {
-        res.status(400).json({ error: 'يُرجى إدخال العنوان بالتفصيل.' });
+      if (
+        cleanFulfillment === 'delivery' &&
+        (!customerAddress || !String(customerAddress).trim() || String(customerAddress).trim().length > 400)
+      ) {
+        res.status(400).json({ error: 'يُرجى إدخال العنوان بالتفصيل (بحد أقصى 400 حرف).' });
+        return;
+      }
+
+      if (String(notes || '').trim().length > 600) {
+        res.status(400).json({ error: 'ملاحظات الطلب طويلة جداً (الحد الأقصى 600 حرف).' });
         return;
       }
 
@@ -922,11 +982,14 @@ async function startServer(): Promise<void> {
         updatedAt: nowIso,
       };
 
-      const savedOrder = await createOrder(newOrder);
-      if (calc.appliedCoupon) {
-        await incrementCouponUsage(bundle.restaurant.id, calc.appliedCoupon.code);
-      }
+      const { order: savedOrder, deduplicated } = await submitOrderAtomic({
+        order: newOrder,
+        couponCode: calc.appliedCoupon?.code,
+      });
 
+      const responseToken = deduplicated
+        ? await signOrderToken(SESSION_SECRET, bundle.restaurant.id, savedOrder.orderNumber)
+        : orderToken;
       const whatsappUrl = buildWhatsAppOrderUrl(
         bundle.restaurant.whatsappNumber,
         savedOrder,
@@ -934,8 +997,17 @@ async function startServer(): Promise<void> {
         bundle.restaurant.systemSettings.currencyLabel
       );
 
-      res.status(201).json({ order: savedOrder, whatsappUrl: whatsappUrl || '', orderToken });
+      res.status(deduplicated ? 200 : 201).json({
+        order: savedOrder,
+        whatsappUrl: whatsappUrl || '',
+        orderToken: responseToken,
+        ...(deduplicated ? { deduplicated: true } : {}),
+      });
     } catch (err) {
+      if (err instanceof StoreConflictError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
       console.error('Create order error:', err);
       res.status(500).json({ error: 'حدث خطأ غير متوقع أثناء تسجيل الطلب. حاول مرة أخرى.' });
     }
@@ -1035,10 +1107,30 @@ async function startServer(): Promise<void> {
     });
   });
 
+  app.post('/api/admin/logout', verifyAdminRequest, async (req, res) => {
+    const adminReq = req as AdminRequest;
+    if (adminReq.adminTokenJti) {
+      await revokeAdminToken(
+        adminReq.adminTokenJti,
+        adminReq.adminTokenExp || Date.now() + 1000 * 60 * 60 * 24 * 7
+      );
+    }
+    res.json({ ok: true });
+  });
+
   app.get('/api/admin/overview', verifyAdminRequest, async (req, res) => {
     try {
       const restaurantId = resolveTargetRestaurantId(req);
       if (!authorizeRestaurantAccess(req, res, restaurantId)) return;
+      const role: EmployeeRole = (req as AdminRequest).adminRole || 'owner';
+      const canEmployees = hasPermission(role, 'employees');
+      const canAi = hasPermission(role, 'ai');
+      const canCoupons = hasPermission(role, 'coupons');
+      const canInventory = hasPermission(role, 'inventory');
+      const canCustomers = hasPermission(role, 'analytics') || hasPermission(role, 'settings');
+      const canSystemConfig =
+        hasPermission(role, 'system') || hasPermission(role, 'settings') || hasPermission(role, 'ai');
+
       const [
         bundle,
         orders,
@@ -1052,17 +1144,33 @@ async function startServer(): Promise<void> {
       ] = await Promise.all([
         getRestaurantBundle(restaurantId),
         listOrders(restaurantId),
-        listAiLogs(restaurantId),
-        listCoupons(restaurantId),
-        listInventoryMovements(restaurantId),
-        listEmployees(restaurantId),
-        listActivityLogs(restaurantId),
+        canAi ? listAiLogs(restaurantId) : Promise.resolve([]),
+        canCoupons ? listCoupons(restaurantId) : Promise.resolve([]),
+        canInventory ? listInventoryMovements(restaurantId) : Promise.resolve([]),
+        canEmployees ? listEmployees(restaurantId) : Promise.resolve([]),
+        canEmployees ? listActivityLogs(restaurantId) : Promise.resolve([]),
         listNotifications(restaurantId),
-        listCustomers(restaurantId),
+        canCustomers ? listCustomers(restaurantId) : Promise.resolve([]),
       ]);
+
+      const safeBundle = {
+        ...bundle,
+        restaurant: canAi
+          ? bundle.restaurant
+          : {
+              ...bundle.restaurant,
+              aiSettings: {
+                enabled: bundle.restaurant.aiSettings.enabled,
+                aiOrderIntake: bundle.restaurant.aiSettings.aiOrderIntake,
+                welcomeMessage: bundle.restaurant.aiSettings.welcomeMessage,
+              },
+            },
+        activeCoupons: canCoupons ? bundle.activeCoupons : [],
+      };
+
       const hoursStatus = evaluateRestaurantHours(bundle.restaurant);
       res.json({
-        bundle,
+        bundle: safeBundle,
         hoursStatus,
         orders,
         aiLogs,
@@ -1072,7 +1180,7 @@ async function startServer(): Promise<void> {
         activityLogs,
         notifications,
         customers,
-        configStatus: getServiceConfigStatus(),
+        configStatus: canSystemConfig ? getServiceConfigStatus() : undefined,
       });
     } catch (err) {
       console.error('Admin overview error:', err);
@@ -1089,6 +1197,10 @@ async function startServer(): Promise<void> {
         const { restaurantId = DEFAULT_RESTAURANT_ID, ...patch } = req.body ?? {};
         const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
         if (!authorizeRestaurantAccess(req, res, targetId)) return;
+        if (patch.logoUrl !== undefined && !isSafeMediaUrl(patch.logoUrl)) {
+          res.status(400).json({ error: 'رابط شعار المطعم غير صالح أو غير آمن.' });
+          return;
+        }
         if (
           patch?.aiSettings?.model &&
           !(ALLOWED_AI_MODELS as readonly string[]).includes(String(patch.aiSettings.model))
@@ -1178,6 +1290,25 @@ async function startServer(): Promise<void> {
           res.status(400).json({ error: 'يُرجى إدخال اسم الصنف وسعر صحيح.' });
           return;
         }
+        if (body.imageUrl !== undefined && !isSafeMediaUrl(body.imageUrl)) {
+          res.status(400).json({ error: 'رابط صورة الصنف غير صالح أو غير آمن.' });
+          return;
+        }
+        const rawSizes = Array.isArray(body.sizes) ? body.sizes : [];
+        const rawExtras = Array.isArray(body.extras) ? body.extras : [];
+        if (
+          rawSizes.some(
+            (s: { priceDelta?: unknown }) =>
+              !Number.isFinite(Number(s?.priceDelta ?? 0)) || Number(s?.priceDelta ?? 0) < 0
+          ) ||
+          rawExtras.some(
+            (ex: { price?: unknown }) =>
+              !Number.isFinite(Number(ex?.price ?? 0)) || Number(ex?.price ?? 0) < 0
+          )
+        ) {
+          res.status(400).json({ error: 'أسعار الأحجام والإضافات يجب أن تكون قيماً صالحة غير سالبة.' });
+          return;
+        }
         const item: MenuItem = {
           id: body.id || `item_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
           restaurantId: targetId,
@@ -1190,8 +1321,8 @@ async function startServer(): Promise<void> {
           isPopular: Boolean(body.isPopular),
           stockQuantity: Math.max(0, Math.floor(Number(body.stockQuantity ?? 40))),
           lowStockThreshold: Math.max(1, Math.floor(Number(body.lowStockThreshold ?? 8))),
-          sizes: Array.isArray(body.sizes) ? body.sizes : [],
-          extras: Array.isArray(body.extras) ? body.extras : [],
+          sizes: rawSizes,
+          extras: rawExtras,
           sortOrder: Number(body.sortOrder ?? 99),
         };
         const saved = await upsertMenuItem(item);
@@ -1387,8 +1518,19 @@ async function startServer(): Promise<void> {
         const targetId = String(body.restaurantId || DEFAULT_RESTAURANT_ID);
         if (!authorizeRestaurantAccess(req, res, targetId)) return;
         const val = Number(body.discountValue);
-        if (!String(body.code || '').trim() || !Number.isFinite(val) || val <= 0) {
-          res.status(400).json({ error: 'يُرجى إدخال كود الخصم وقيمة خصم صحيحة.' });
+        const discountType = body.discountType === 'fixed' ? 'fixed' : 'percentage';
+        if (
+          !String(body.code || '').trim() ||
+          !Number.isFinite(val) ||
+          val <= 0 ||
+          (discountType === 'percentage' && val > 100)
+        ) {
+          res.status(400).json({
+            error:
+              discountType === 'percentage' && val > 100
+                ? 'نسبة الخصم لا يمكن أن تتجاوز ١٠٠٪.'
+                : 'يُرجى إدخال كود الخصم وقيمة خصم صحيحة.',
+          });
           return;
         }
         const coupon: Coupon = {
@@ -1396,7 +1538,7 @@ async function startServer(): Promise<void> {
           restaurantId: targetId,
           code: String(body.code).trim().toUpperCase(),
           description: String(body.description || '').trim(),
-          discountType: body.discountType === 'fixed' ? 'fixed' : 'percentage',
+          discountType,
           discountValue: val,
           minOrderAmount: Math.max(0, Number(body.minOrderAmount ?? 0)),
           maxDiscountAmount: body.maxDiscountAmount ? Number(body.maxDiscountAmount) : undefined,
@@ -1543,6 +1685,10 @@ async function startServer(): Promise<void> {
         }
         res.json({ order: updated });
       } catch (err) {
+        if (err instanceof StoreConflictError) {
+          res.status(err.statusCode).json({ error: err.message });
+          return;
+        }
         console.error('Update order status error:', err);
         res.status(500).json({
           error: err instanceof Error ? err.message : 'تعذر تحديث حالة الطلب.',
@@ -1681,8 +1827,20 @@ async function startServer(): Promise<void> {
           res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
           return;
         }
-        await setLocalAdminPassword(nextPass);
-        const token = signLocalAdminToken(actorEmail, actorRole, actorRestaurantId, false);
+        const changedAt = await setLocalAdminPassword(nextPass, adminReq.adminTokenIat || 0);
+        if (adminReq.adminTokenJti) {
+          await revokeAdminToken(
+            adminReq.adminTokenJti,
+            adminReq.adminTokenExp || Date.now() + 1000 * 60 * 60 * 24 * 7
+          );
+        }
+        const token = signLocalAdminToken(
+          actorEmail,
+          actorRole,
+          actorRestaurantId,
+          false,
+          changedAt
+        );
         res.json({ ok: true, token, mustChangePassword: false });
         return;
       }
@@ -1696,8 +1854,25 @@ async function startServer(): Promise<void> {
         res.status(400).json({ error: 'كلمة المرور الحالية غير صحيحة.' });
         return;
       }
-      await updateEmployeePassword(actorRestaurantId, actorEmail, nextPass);
-      const token = signLocalAdminToken(actorEmail, actorRole, actorRestaurantId, false);
+      const empPwdRes = await updateEmployeePassword(
+        actorRestaurantId,
+        actorEmail,
+        nextPass,
+        adminReq.adminTokenIat || 0
+      );
+      if (adminReq.adminTokenJti) {
+        await revokeAdminToken(
+          adminReq.adminTokenJti,
+          adminReq.adminTokenExp || Date.now() + 1000 * 60 * 60 * 24 * 7
+        );
+      }
+      const token = signLocalAdminToken(
+        actorEmail,
+        actorRole,
+        actorRestaurantId,
+        false,
+        empPwdRes.passwordChangedAt || Date.now()
+      );
       res.json({ ok: true, token, mustChangePassword: false });
     } catch {
       res.status(500).json({ error: 'تعذر تغيير كلمة المرور حالياً.' });

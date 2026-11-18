@@ -10,6 +10,7 @@ import { calculateOrderTotals } from './lib/pricing.ts';
 import { buildWhatsAppOrderUrl } from './lib/whatsapp.ts';
 import {
   COMPROMISED_DEFAULT_PASSWORDS,
+  constantTimeEqual,
   verifyPasswordAgainstHash,
 } from '../worker/auth.ts';
 import {
@@ -18,13 +19,17 @@ import {
   isKnownSpaRoute,
   isStaticAssetPath,
 } from '../worker/middleware/security.ts';
-import { decodeBase64ToBytes, detectValidImageFromBytes } from './lib/uploadValidation.ts';
+import { StoreConflictError } from './lib/errors.ts';
+import {
+  decodeBase64ToBytes,
+  detectValidImageFromBytes,
+  isSafeMediaUrl,
+} from './lib/uploadValidation.ts';
 import {
   type EdgeEnv,
   adjustItemStock,
   appendActivityLog,
   appendAiLog,
-  createOrder,
   deleteBranch,
   deleteCategory,
   deleteCoupon,
@@ -35,8 +40,10 @@ import {
   findOrderByIdempotencyKey,
   findOrderByNumberOrId,
   findRestaurantBundle,
+  getEmployeeAuthState,
+  getOwnerPasswordChangedAt,
   getRestaurantBundle,
-  incrementCouponUsage,
+  isAdminTokenRevoked,
   isSupabaseBackendActive,
   listActivityLogs,
   listAiLogs,
@@ -50,7 +57,9 @@ import {
   probeBackendHealth,
   rateOrder,
   reorderMenuItems,
+  revokeAdminToken,
   setAdminPassword,
+  submitOrderAtomic,
   updateEmployeePassword,
   updateOrderPaymentStatus,
   updateOrderStatus,
@@ -152,7 +161,8 @@ async function signAdminToken(
   email: string,
   role: EmployeeRole = 'owner',
   restaurantId: string = DEFAULT_RESTAURANT_ID,
-  mustChangePassword = false
+  mustChangePassword = false,
+  issuedAtMs: number = Date.now()
 ): Promise<string> {
   if (!secret || secret.length < 32) {
     throw new Error('ADMIN_SESSION_SECRET must be configured with at least 32 characters.');
@@ -162,7 +172,9 @@ async function signAdminToken(
     role,
     restaurantId,
     mustChangePassword,
-    exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
+    jti: crypto.randomUUID(),
+    iat: issuedAtMs,
+    exp: issuedAtMs + 1000 * 60 * 60 * 24 * 7,
   });
   const payload = toBase64Url(new TextEncoder().encode(payloadJson));
   const sig = await hmacSign(secret, payload);
@@ -177,13 +189,16 @@ async function verifyLocalAdminToken(
   role: EmployeeRole;
   restaurantId: string;
   mustChangePassword: boolean;
+  jti: string;
+  iat: number;
+  exp: number;
 } | null> {
   if (!secret || secret.length < 32 || !token.startsWith('local.')) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [, payload, sig] = parts;
   const expectedSig = await hmacSign(secret, payload);
-  if (sig !== expectedSig) return null;
+  if (!constantTimeEqual(sig, expectedSig)) return null;
   try {
     const decodedStr = new TextDecoder().decode(fromBase64Url(payload));
     const decoded = JSON.parse(decodedStr) as {
@@ -191,6 +206,8 @@ async function verifyLocalAdminToken(
       role?: EmployeeRole;
       restaurantId?: string;
       mustChangePassword?: boolean;
+      jti?: string;
+      iat?: number;
       exp: number;
     };
     if (decoded.exp < Date.now()) return null;
@@ -201,6 +218,9 @@ async function verifyLocalAdminToken(
       role,
       restaurantId: String(decoded.restaurantId || DEFAULT_RESTAURANT_ID),
       mustChangePassword: Boolean(decoded.mustChangePassword),
+      jti: typeof decoded.jti === 'string' ? decoded.jti : '',
+      iat: Number(decoded.iat || 0),
+      exp: Number(decoded.exp),
     };
   } catch {
     return null;
@@ -219,6 +239,9 @@ interface VerifiedAdminIdentity {
   restaurantId: string;
   mustChangePassword: boolean;
   authType: 'local' | 'supabase';
+  tokenJti?: string;
+  tokenExp?: number;
+  tokenIat?: number;
 }
 
 function authorizeRestaurantAccess(
@@ -286,10 +309,51 @@ async function verifyAdminRequest(
 
   const localAdmin = await verifyLocalAdminToken(getSessionSecret(env), token);
   if (localAdmin) {
+    if (await isAdminTokenRevoked(env, localAdmin.jti)) {
+      return Response.json(
+        { error: 'تم إنهاء الجلسة. يُرجى تسجيل الدخول مرة أخرى.' },
+        { status: 401 }
+      );
+    }
+
+    const expectedOwnerEmail = (env.ADMIN_EMAIL || 'admin@hara-grill.eg').toLowerCase();
+    let resolvedRole = localAdmin.role;
+    if (localAdmin.email.toLowerCase() === expectedOwnerEmail && localAdmin.role === 'owner') {
+      const ownerChangedAt = await getOwnerPasswordChangedAt(env);
+      if (ownerChangedAt && localAdmin.iat < ownerChangedAt) {
+        return Response.json(
+          { error: 'تم تغيير كلمة المرور. يُرجى إعادة تسجيل الدخول.' },
+          { status: 401 }
+        );
+      }
+    } else {
+      const empState = await getEmployeeAuthState(
+        env,
+        localAdmin.restaurantId,
+        localAdmin.email
+      );
+      if (!empState.exists || !empState.isActive) {
+        return Response.json(
+          { error: 'تم تعطيل هذا الحساب أو حذفه.' },
+          { status: 401 }
+        );
+      }
+      if (empState.passwordChangedAt && localAdmin.iat < empState.passwordChangedAt) {
+        return Response.json(
+          { error: 'تم تغيير كلمة المرور. يُرجى إعادة تسجيل الدخول.' },
+          { status: 401 }
+        );
+      }
+      if (empState.role) {
+        resolvedRole = empState.role;
+      }
+    }
+
     if (
       localAdmin.mustChangePassword &&
       pathname !== '/api/admin/me' &&
-      pathname !== '/api/admin/password'
+      pathname !== '/api/admin/password' &&
+      pathname !== '/api/admin/logout'
     ) {
       return Response.json(
         {
@@ -301,10 +365,13 @@ async function verifyAdminRequest(
     }
     return {
       email: localAdmin.email,
-      role: localAdmin.role,
+      role: resolvedRole,
       restaurantId: localAdmin.restaurantId,
       mustChangePassword: localAdmin.mustChangePassword,
       authType: 'local',
+      tokenJti: localAdmin.jti,
+      tokenExp: localAdmin.exp,
+      tokenIat: localAdmin.iat,
     };
   }
 
@@ -895,12 +962,15 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         );
       }
 
-      if (!customerName || !String(customerName).trim()) {
-        return Response.json({ error: 'يُرجى إدخال اسم العميل.' }, { status: 400 });
+      if (!customerName || !String(customerName).trim() || String(customerName).trim().length > 120) {
+        return Response.json(
+          { error: 'يُرجى إدخال اسم العميل (بحد أقصى 120 حرفاً).' },
+          { status: 400 }
+        );
       }
 
       const cleanPhone = String(customerPhone || '').trim();
-      if (!cleanPhone || cleanPhone.replace(/[^\d]/g, '').length < 8) {
+      if (!cleanPhone || cleanPhone.replace(/[^\d]/g, '').length < 8 || cleanPhone.length > 30) {
         return Response.json(
           { error: 'يُرجى إدخال رقم هاتف صحيح للتواصل.' },
           { status: 400 }
@@ -910,8 +980,23 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       const cleanFulfillment: FulfillmentType =
         fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
 
-      if (cleanFulfillment === 'delivery' && (!customerAddress || !String(customerAddress).trim())) {
-        return Response.json({ error: 'يُرجى إدخال العنوان بالتفصيل.' }, { status: 400 });
+      if (
+        cleanFulfillment === 'delivery' &&
+        (!customerAddress ||
+          !String(customerAddress).trim() ||
+          String(customerAddress).trim().length > 400)
+      ) {
+        return Response.json(
+          { error: 'يُرجى إدخال العنوان بالتفصيل (بحد أقصى 400 حرف).' },
+          { status: 400 }
+        );
+      }
+
+      if (String(notes || '').trim().length > 600) {
+        return Response.json(
+          { error: 'ملاحظات الطلب طويلة جداً (الحد الأقصى 600 حرف).' },
+          { status: 400 }
+        );
       }
 
       const calc = calculateOrderTotals(
@@ -1016,11 +1101,14 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         updatedAt: nowIso,
       };
 
-      const savedOrder = await createOrder(env, newOrder);
-      if (calc.appliedCoupon) {
-        await incrementCouponUsage(env, bundle.restaurant.id, calc.appliedCoupon.code);
-      }
+      const { order: savedOrder, deduplicated } = await submitOrderAtomic(env, {
+        order: newOrder,
+        couponCode: calc.appliedCoupon?.code,
+      });
 
+      const responseToken = deduplicated
+        ? await signOrderToken(secret, bundle.restaurant.id, savedOrder.orderNumber)
+        : orderToken;
       const whatsappUrl = buildWhatsAppOrderUrl(
         bundle.restaurant.whatsappNumber,
         savedOrder,
@@ -1029,10 +1117,18 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       );
 
       return Response.json(
-        { order: savedOrder, whatsappUrl: whatsappUrl || '', orderToken },
-        { status: 201 }
+        {
+          order: savedOrder,
+          whatsappUrl: whatsappUrl || '',
+          orderToken: responseToken,
+          ...(deduplicated ? { deduplicated: true } : {}),
+        },
+        { status: deduplicated ? 200 : 201 }
       );
     } catch (err) {
+      if (err instanceof StoreConflictError) {
+        return Response.json({ error: err.message }, { status: err.statusCode });
+      }
       console.error('Create order error:', err);
       return Response.json(
         { error: 'حدث خطأ غير متوقع أثناء تسجيل الطلب. حاول مرة أخرى.' },
@@ -1170,11 +1266,34 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
       });
     }
 
+    if (method === 'POST' && pathname === '/api/admin/logout') {
+      if (auth.tokenJti) {
+        await revokeAdminToken(
+          env,
+          auth.tokenJti,
+          auth.tokenExp || Date.now() + 1000 * 60 * 60 * 24 * 7
+        );
+      }
+      return Response.json({ ok: true });
+    }
+
     if (method === 'GET' && pathname === '/api/admin/overview') {
       try {
         const restaurantId = queryRestaurantId || DEFAULT_RESTAURANT_ID;
         const tenantDenied = authorizeRestaurantAccess(auth, restaurantId);
         if (tenantDenied) return tenantDenied;
+
+        const canEmployees = hasPermission(auth.role, 'employees');
+        const canAi = hasPermission(auth.role, 'ai');
+        const canCoupons = hasPermission(auth.role, 'coupons');
+        const canInventory = hasPermission(auth.role, 'inventory');
+        const canCustomers =
+          hasPermission(auth.role, 'analytics') || hasPermission(auth.role, 'settings');
+        const canSystemConfig =
+          hasPermission(auth.role, 'system') ||
+          hasPermission(auth.role, 'settings') ||
+          hasPermission(auth.role, 'ai');
+
         const [
           bundle,
           orders,
@@ -1188,17 +1307,33 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         ] = await Promise.all([
           getRestaurantBundle(env, restaurantId),
           listOrders(env, restaurantId),
-          listAiLogs(env, restaurantId),
-          listCoupons(env, restaurantId),
-          listInventoryMovements(env, restaurantId),
-          listEmployees(env, restaurantId),
-          listActivityLogs(env, restaurantId),
+          canAi ? listAiLogs(env, restaurantId) : Promise.resolve([]),
+          canCoupons ? listCoupons(env, restaurantId) : Promise.resolve([]),
+          canInventory ? listInventoryMovements(env, restaurantId) : Promise.resolve([]),
+          canEmployees ? listEmployees(env, restaurantId) : Promise.resolve([]),
+          canEmployees ? listActivityLogs(env, restaurantId) : Promise.resolve([]),
           listNotifications(env, restaurantId),
-          listCustomers(env, restaurantId),
+          canCustomers ? listCustomers(env, restaurantId) : Promise.resolve([]),
         ]);
+
+        const safeBundle = {
+          ...bundle,
+          restaurant: canAi
+            ? bundle.restaurant
+            : {
+                ...bundle.restaurant,
+                aiSettings: {
+                  enabled: bundle.restaurant.aiSettings.enabled,
+                  aiOrderIntake: bundle.restaurant.aiSettings.aiOrderIntake,
+                  welcomeMessage: bundle.restaurant.aiSettings.welcomeMessage,
+                },
+              },
+          activeCoupons: canCoupons ? bundle.activeCoupons : [],
+        };
+
         const hoursStatus = evaluateRestaurantHours(bundle.restaurant);
         return Response.json({
-          bundle,
+          bundle: safeBundle,
           hoursStatus,
           orders,
           aiLogs,
@@ -1208,7 +1343,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           activityLogs,
           notifications,
           customers,
-          configStatus: getServiceConfigStatus(env),
+          configStatus: canSystemConfig ? getServiceConfigStatus(env) : undefined,
         });
       } catch (err) {
         console.error('Admin overview error:', err);
@@ -1225,6 +1360,12 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const targetId = String(restaurantId || DEFAULT_RESTAURANT_ID);
         const tenantDenied = authorizeRestaurantAccess(auth, targetId);
         if (tenantDenied) return tenantDenied;
+        if (patch.logoUrl !== undefined && !isSafeMediaUrl(patch.logoUrl)) {
+          return Response.json(
+            { error: 'رابط شعار المطعم غير صالح أو غير آمن.' },
+            { status: 400 }
+          );
+        }
         const aiPatch = patch.aiSettings as { model?: string } | undefined;
         if (aiPatch?.model && !(ALLOWED_AI_MODELS as readonly string[]).includes(String(aiPatch.model))) {
           return Response.json(
@@ -1306,6 +1447,27 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         if (!String(body.name || '').trim() || !Number.isFinite(price) || price < 0) {
           return Response.json({ error: 'يُرجى إدخال اسم الصنف وسعر صحيح.' }, { status: 400 });
         }
+        if (body.imageUrl !== undefined && !isSafeMediaUrl(body.imageUrl)) {
+          return Response.json(
+            { error: 'رابط صورة الصنف غير صالح أو غير آمن.' },
+            { status: 400 }
+          );
+        }
+        const rawSizes = Array.isArray(body.sizes) ? (body.sizes as MenuItem['sizes']) : [];
+        const rawExtras = Array.isArray(body.extras) ? (body.extras as MenuItem['extras']) : [];
+        if (
+          rawSizes.some(
+            (s) => !Number.isFinite(Number(s?.priceDelta ?? 0)) || Number(s?.priceDelta ?? 0) < 0
+          ) ||
+          rawExtras.some(
+            (ex) => !Number.isFinite(Number(ex?.price ?? 0)) || Number(ex?.price ?? 0) < 0
+          )
+        ) {
+          return Response.json(
+            { error: 'أسعار الأحجام والإضافات يجب أن تكون قيماً صالحة غير سالبة.' },
+            { status: 400 }
+          );
+        }
         const item: MenuItem = {
           id: String(body.id || `item_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`),
           restaurantId: targetId,
@@ -1318,8 +1480,8 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           isPopular: Boolean(body.isPopular),
           stockQuantity: Math.max(0, Math.floor(Number(body.stockQuantity ?? 40))),
           lowStockThreshold: Math.max(1, Math.floor(Number(body.lowStockThreshold ?? 8))),
-          sizes: Array.isArray(body.sizes) ? (body.sizes as MenuItem['sizes']) : [],
-          extras: Array.isArray(body.extras) ? (body.extras as MenuItem['extras']) : [],
+          sizes: rawSizes,
+          extras: rawExtras,
           sortOrder: Number(body.sortOrder ?? 99),
         };
         const saved = await upsertMenuItem(env, item);
@@ -1510,9 +1672,20 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         const tenantDenied = authorizeRestaurantAccess(auth, targetId);
         if (tenantDenied) return tenantDenied;
         const val = Number(body.discountValue);
-        if (!String(body.code || '').trim() || !Number.isFinite(val) || val <= 0) {
+        const discountType = body.discountType === 'fixed' ? 'fixed' : 'percentage';
+        if (
+          !String(body.code || '').trim() ||
+          !Number.isFinite(val) ||
+          val <= 0 ||
+          (discountType === 'percentage' && val > 100)
+        ) {
           return Response.json(
-            { error: 'يُرجى إدخال كود الخصم وقيمة خصم صحيحة.' },
+            {
+              error:
+                discountType === 'percentage' && val > 100
+                  ? 'نسبة الخصم لا يمكن أن تتجاوز ١٠٠٪.'
+                  : 'يُرجى إدخال كود الخصم وقيمة خصم صحيحة.',
+            },
             { status: 400 }
           );
         }
@@ -1521,7 +1694,7 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           restaurantId: targetId,
           code: String(body.code).trim().toUpperCase(),
           description: String(body.description || '').trim(),
-          discountType: body.discountType === 'fixed' ? 'fixed' : 'percentage',
+          discountType,
           discountValue: val,
           minOrderAmount: Math.max(0, Number(body.minOrderAmount ?? 0)),
           maxDiscountAmount: body.maxDiscountAmount ? Number(body.maxDiscountAmount) : undefined,
@@ -1689,6 +1862,9 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         if (!updated) return Response.json({ error: 'الطلب غير موجود.' }, { status: 404 });
         return Response.json({ order: updated });
       } catch (err) {
+        if (err instanceof StoreConflictError) {
+          return Response.json({ error: err.message }, { status: err.statusCode });
+        }
         console.error('Update order status error:', err);
         return Response.json(
           { error: err instanceof Error ? err.message : 'تعذر تحديث حالة الطلب.' },
@@ -1808,13 +1984,21 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
           if (!currentOk) {
             return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
           }
-          await setAdminPassword(env, nextPass);
+          const changedAt = await setAdminPassword(env, nextPass, auth.tokenIat || 0);
+          if (auth.tokenJti) {
+            await revokeAdminToken(
+              env,
+              auth.tokenJti,
+              auth.tokenExp || Date.now() + 1000 * 60 * 60 * 24 * 7
+            );
+          }
           const freshToken = await signAdminToken(
             secret,
             auth.email,
             auth.role,
             auth.restaurantId,
-            false
+            false,
+            changedAt
           );
           return Response.json({ ok: true, token: freshToken, mustChangePassword: false });
         }
@@ -1827,13 +2011,27 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
         ) {
           return Response.json({ error: 'كلمة المرور الحالية غير صحيحة.' }, { status: 400 });
         }
-        await updateEmployeePassword(env, auth.restaurantId, auth.email, nextPass);
+        const empPwdRes = await updateEmployeePassword(
+          env,
+          auth.restaurantId,
+          auth.email,
+          nextPass,
+          auth.tokenIat || 0
+        );
+        if (auth.tokenJti) {
+          await revokeAdminToken(
+            env,
+            auth.tokenJti,
+            auth.tokenExp || Date.now() + 1000 * 60 * 60 * 24 * 7
+          );
+        }
         const freshToken = await signAdminToken(
           secret,
           auth.email,
           auth.role,
           auth.restaurantId,
-          false
+          false,
+          empPwdRes.passwordChangedAt || Date.now()
         );
         return Response.json({ ok: true, token: freshToken, mustChangePassword: false });
       } catch {

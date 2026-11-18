@@ -167,12 +167,26 @@ export async function incrementCouponUsageSupabase(
   supabase: SupabaseClient,
   restaurantId: string,
   couponCode: string
-): Promise<void> {
-  const { error } = await supabase.rpc('increment_coupon_usage', {
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc('increment_coupon_usage', {
     p_restaurant_id: restaurantId,
     p_code: couponCode.trim().toUpperCase(),
   });
   if (error) {
     throw new Error(`Failed to increment coupon usage: ${error.message}`);
   }
+  if (typeof data === 'boolean') return data;
+  return true;
 }
+
+export async function decrementCouponUsageSupabase(
+  supabase: SupabaseClient,
+  restaurantId: string,
+  couponCode: string
+): Promise<void> {
+  await supabase.rpc('decrement_coupon_usage', {
+    p_restaurant_id: restaurantId,
+    p_code: couponCode.trim().toUpperCase(),
+  });
+}
+

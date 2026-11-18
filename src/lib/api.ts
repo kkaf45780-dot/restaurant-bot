@@ -317,6 +317,17 @@ export async function adminLoginLocal(
   return parseJsonOrThrow(res);
 }
 
+export async function adminLogout(token: string): Promise<void> {
+  await fetchWithRetry(
+    '/api/admin/logout',
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    },
+    { retry: false, timeoutMs: AUTH_TIMEOUT_MS }
+  ).catch(() => undefined);
+}
+
 export async function fetchAdminMe(token: string): Promise<{
   authenticated: boolean;
   email: string;
@@ -349,7 +360,7 @@ export async function fetchAdminOverview(
   activityLogs: ActivityLog[];
   notifications: AdminNotification[];
   customers?: Customer[];
-  configStatus: ServiceConfigStatus;
+  configStatus?: ServiceConfigStatus;
 }> {
   const qs = restaurantId ? `?restaurantId=${encodeURIComponent(restaurantId)}` : '';
   const res = await fetchWithRetry(`/api/admin/overview${qs}`, {

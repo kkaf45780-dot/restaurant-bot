@@ -79,3 +79,24 @@ export function decodeBase64ToBytes(cleanBase64: string): Uint8Array {
   }
   return bytes;
 }
+
+export function isSafeMediaUrl(raw: unknown): boolean {
+  if (raw === undefined || raw === null) return true;
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return true;
+  if (trimmed.length > 100_000) return false;
+  // Allow safe relative paths (/uploads/..., /assets/..., etc.) but reject protocol-relative //
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
+  // Allow safe base64 raster data URLs (never SVG)
+  if (/^data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+

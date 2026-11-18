@@ -140,7 +140,9 @@ create table if not exists public.orders (
 
 create index if not exists idx_orders_rest_number on public.orders (restaurant_id, order_number);
 create index if not exists idx_orders_token on public.orders (order_token);
-create index if not exists idx_orders_rest_idempotency on public.orders (restaurant_id, idempotency_key);
+create unique index if not exists uq_orders_rest_idempotency
+  on public.orders (restaurant_id, idempotency_key)
+  where idempotency_key is not null and idempotency_key <> '';
 create index if not exists idx_orders_rest_created on public.orders (restaurant_id, created_at desc);
 create index if not exists idx_orders_rest_status_created on public.orders (restaurant_id, status, created_at desc);
 
@@ -187,6 +189,7 @@ create table if not exists public.employees (
   role text not null default 'cashier',
   password_hash text,
   must_change_password boolean not null default true,
+  password_changed_at timestamptz,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   unique(restaurant_id, email)
@@ -255,18 +258,38 @@ create index if not exists idx_ai_logs_rest_ts on public.ai_logs (restaurant_id,
 create index if not exists idx_customers_rest_phone on public.customers (restaurant_id, phone);
 create index if not exists idx_customers_rest_last_order on public.customers (restaurant_id, last_order_at desc);
 
--- 15. دالة ذرية لزيادة عداد الكوبون بأمان
+-- 15. دالة ذرية لزيادة عداد الكوبون بأمان مع التحقق من الحد الأقصى
 create or replace function public.increment_coupon_usage(
   p_restaurant_id text,
   p_code text
-) returns void language plpgsql security definer as $$
+) returns boolean language plpgsql security definer set search_path = public as $$
+declare
+  v_updated_id text;
 begin
   update public.coupons
   set used_count = used_count + 1
   where restaurant_id = p_restaurant_id
+    and upper(code) = upper(p_code)
+    and is_active = true
+    and (usage_limit = 0 or used_count < usage_limit)
+  returning id into v_updated_id;
+
+  return v_updated_id is not null;
+end;
+$$;
+
+create or replace function public.decrement_coupon_usage(
+  p_restaurant_id text,
+  p_code text
+) returns void language plpgsql security definer set search_path = public as $$
+begin
+  update public.coupons
+  set used_count = greatest(0, used_count - 1)
+  where restaurant_id = p_restaurant_id
     and upper(code) = upper(p_code);
 end;
 $$;
+
 
 -- =====================================================================
 -- تفعيل سياسات الحماية (RLS)

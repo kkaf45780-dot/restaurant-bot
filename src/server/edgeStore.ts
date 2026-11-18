@@ -6,6 +6,7 @@ import {
   verifyPasswordAgainstHash,
 } from '../../worker/auth.ts';
 import {
+  decrementCouponUsageSupabase,
   findOrderByTokenSupabase,
   incrementCouponUsageSupabase,
   insertOrderItemsSupabase,
@@ -13,6 +14,7 @@ import {
   isProductionSupabaseRequired,
   upsertCustomerForOrderSupabase,
 } from '../../worker/db/supabase.ts';
+import { StoreConflictError } from '../lib/errors.ts';
 import {
   DEFAULT_RESTAURANT_ID,
   INITIAL_ACTIVITY_LOGS,
@@ -95,10 +97,33 @@ interface EdgeDatabaseSchema {
   notifications: AdminNotification[];
   aiLogs: AILogEntry[];
   adminPasswordOverride?: string;
+  adminPasswordChangedAt?: number;
+  revokedTokenJtis?: Record<string, number>;
 }
 
 const KV_DB_KEY = 'restaurant_db_v1';
 let memoryFallbackDb: EdgeDatabaseSchema | null = null;
+
+let edgeDbQueue: Promise<unknown> = Promise.resolve();
+function withEdgeDbLock<T>(fn: () => Promise<T> | T): Promise<T> {
+  const next = edgeDbQueue.then(fn, fn);
+  edgeDbQueue = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
+const memoryRevokedJtis = new Map<string, number>();
+let memoryOwnerPasswordChangedAt: number | null = null;
+const memoryEmployeePasswordChangedAt = new Map<string, number>();
+
+export function resetEdgeMemoryStateForTest(): void {
+  memoryFallbackDb = null;
+  memoryRevokedJtis.clear();
+  memoryOwnerPasswordChangedAt = null;
+  memoryEmployeePasswordChangedAt.clear();
+}
 
 function getInitialDb(): EdgeDatabaseSchema {
   return {
@@ -162,6 +187,18 @@ async function readEdgeDb(env: EdgeEnv): Promise<EdgeDatabaseSchema> {
           notifications: stored.notifications ?? seed.notifications,
           aiLogs: stored.aiLogs ?? [],
           adminPasswordOverride: stored.adminPasswordOverride,
+          adminPasswordChangedAt:
+            typeof stored.adminPasswordChangedAt === 'number'
+              ? stored.adminPasswordChangedAt
+              : undefined,
+          revokedTokenJtis:
+            stored.revokedTokenJtis && typeof stored.revokedTokenJtis === 'object'
+              ? Object.fromEntries(
+                  Object.entries(stored.revokedTokenJtis).filter(
+                    ([, exp]) => typeof exp === 'number' && exp > Date.now()
+                  )
+                )
+              : undefined,
         };
       }
     } catch {
@@ -875,21 +912,28 @@ export async function incrementCouponUsage(
   env: EdgeEnv,
   restaurantId: string,
   code: string
-): Promise<void> {
+): Promise<boolean> {
   const upper = code.trim().toUpperCase();
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
-    await incrementCouponUsageSupabase(supabase, restaurantId, upper);
-    return;
+    return incrementCouponUsageSupabase(supabase, restaurantId, upper);
   }
-  const db = await readEdgeDb(env);
-  const idx = db.coupons.findIndex(
-    (c) => c.restaurantId === restaurantId && c.code.toUpperCase() === upper
-  );
-  if (idx >= 0) {
-    db.coupons[idx] = { ...db.coupons[idx], usedCount: (db.coupons[idx].usedCount ?? 0) + 1 };
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    const idx = db.coupons.findIndex(
+      (c) => c.restaurantId === restaurantId && c.code.toUpperCase() === upper
+    );
+    if (idx < 0) return false;
+    const coupon = db.coupons[idx];
+    const limit = coupon.usageLimit ?? 0;
+    const used = coupon.usedCount ?? 0;
+    if (!coupon.isActive || (limit > 0 && used >= limit)) {
+      return false;
+    }
+    db.coupons[idx] = { ...coupon, usedCount: used + 1 };
     await writeEdgeDb(env, db);
-  }
+    return true;
+  });
 }
 
 export async function listOrders(env: EdgeEnv, restaurantId: string, limit = 250): Promise<Order[]> {
@@ -977,7 +1021,7 @@ export async function findOrderByNumberOrId(
   query: string
 ): Promise<Order | null> {
   const clean = query.replace(/^#/, '').trim();
-  if (!clean) return null;
+  if (!clean || !/^[a-zA-Z0-9_-]{1,80}$/.test(clean)) return null;
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
     const { data, error } = await supabase
@@ -1088,55 +1132,243 @@ export async function createOrder(env: EdgeEnv, order: Order): Promise<Order> {
     throw new Error('Supabase configuration is required in production mode.');
   }
 
-  const db = await readEdgeDb(env);
-  db.orders.unshift(safeOrder);
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    db.orders.unshift(safeOrder);
 
-  const cleanPhone = safeOrder.customerPhone.trim();
-  if (cleanPhone) {
-    const custIdx = db.customers.findIndex(
-      (c) => c.restaurantId === safeOrder.restaurantId && c.phone === cleanPhone
-    );
-    if (custIdx >= 0) {
-      const existing = db.customers[custIdx];
-      db.customers[custIdx] = {
-        ...existing,
-        name: safeOrder.customerName,
-        defaultAddress: safeOrder.customerAddress || existing.defaultAddress,
-        lastZoneId: safeOrder.deliveryZoneId || existing.lastZoneId,
-        ordersCount: existing.ordersCount + 1,
-        totalSpent: existing.totalSpent + safeOrder.total,
-        lastOrderAt: safeOrder.createdAt,
-        updatedAt: safeOrder.createdAt,
-      };
-    } else {
-      db.customers.unshift({
-        id: `cust_${safeOrder.restaurantId}_${cleanPhone.replace(/[^\d]/g, '') || cleanPhone}`,
-        restaurantId: safeOrder.restaurantId,
-        name: safeOrder.customerName,
-        phone: cleanPhone,
-        defaultAddress: safeOrder.customerAddress || '',
-        lastZoneId: safeOrder.deliveryZoneId || undefined,
-        ordersCount: 1,
-        totalSpent: safeOrder.total,
-        lastOrderAt: safeOrder.createdAt,
-        createdAt: safeOrder.createdAt,
-        updatedAt: safeOrder.createdAt,
-      });
+    const cleanPhone = safeOrder.customerPhone.trim();
+    if (cleanPhone) {
+      const custIdx = db.customers.findIndex(
+        (c) => c.restaurantId === safeOrder.restaurantId && c.phone === cleanPhone
+      );
+      if (custIdx >= 0) {
+        const existing = db.customers[custIdx];
+        db.customers[custIdx] = {
+          ...existing,
+          name: safeOrder.customerName,
+          defaultAddress: safeOrder.customerAddress || existing.defaultAddress,
+          lastZoneId: safeOrder.deliveryZoneId || existing.lastZoneId,
+          ordersCount: existing.ordersCount + 1,
+          totalSpent: existing.totalSpent + safeOrder.total,
+          lastOrderAt: safeOrder.createdAt,
+          updatedAt: safeOrder.createdAt,
+        };
+      } else {
+        db.customers.unshift({
+          id: `cust_${safeOrder.restaurantId}_${cleanPhone.replace(/[^\d]/g, '') || cleanPhone}`,
+          restaurantId: safeOrder.restaurantId,
+          name: safeOrder.customerName,
+          phone: cleanPhone,
+          defaultAddress: safeOrder.customerAddress || '',
+          lastZoneId: safeOrder.deliveryZoneId || undefined,
+          ordersCount: 1,
+          totalSpent: safeOrder.total,
+          lastOrderAt: safeOrder.createdAt,
+          createdAt: safeOrder.createdAt,
+          updatedAt: safeOrder.createdAt,
+        });
+      }
     }
+
+    db.notifications.unshift({
+      id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      restaurantId: safeOrder.restaurantId,
+      type: 'order',
+      title: `طلب جديد #${safeOrder.orderNumber}`,
+      message: `طلب من ${safeOrder.customerName} بقيمة ${safeOrder.total} ج.م.`,
+      isRead: false,
+      createdAt: safeOrder.createdAt,
+    });
+    db.notifications = db.notifications.slice(0, 40);
+    await writeEdgeDb(env, db);
+    return safeOrder;
+  });
+}
+
+export async function submitOrderAtomic(
+  env: EdgeEnv,
+  params: { order: Order; couponCode?: string }
+): Promise<{ order: Order; deduplicated: boolean }> {
+  const { order, couponCode } = params;
+  const safeOrder: Order = {
+    ...order,
+    orderToken: order.orderToken || crypto.randomUUID(),
+  };
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    if (safeOrder.idempotencyKey) {
+      const existing = await findOrderByIdempotencyKey(
+        env,
+        safeOrder.restaurantId,
+        safeOrder.idempotencyKey
+      );
+      if (existing) return { order: existing, deduplicated: true };
+    }
+
+    const cleanCoupon = couponCode?.trim().toUpperCase();
+    let couponClaimed = false;
+    if (cleanCoupon) {
+      couponClaimed = await incrementCouponUsageSupabase(
+        supabase,
+        safeOrder.restaurantId,
+        cleanCoupon
+      );
+      if (!couponClaimed) {
+        throw new StoreConflictError('تم استنفاد الحد الأقصى لاستخدام كود الخصم.', 409);
+      }
+    }
+
+    const { error } = await supabase.from('orders').insert({
+      id: safeOrder.id,
+      order_number: safeOrder.orderNumber,
+      order_token: safeOrder.orderToken,
+      restaurant_id: safeOrder.restaurantId,
+      customer_name: safeOrder.customerName,
+      customer_phone: safeOrder.customerPhone,
+      fulfillment_type: safeOrder.fulfillmentType,
+      delivery_zone_id: safeOrder.deliveryZoneId,
+      delivery_zone_name: safeOrder.deliveryZoneName,
+      branch_id: safeOrder.branchId ?? null,
+      branch_name: safeOrder.branchName ?? null,
+      customer_address: safeOrder.customerAddress,
+      notes: safeOrder.notes,
+      items: safeOrder.items,
+      subtotal: safeOrder.subtotal,
+      discount_amount: safeOrder.discountAmount,
+      coupon_code: safeOrder.couponCode ?? null,
+      delivery_fee: safeOrder.deliveryFee,
+      total: safeOrder.total,
+      payment_method: safeOrder.paymentMethod,
+      payment_status: safeOrder.paymentStatus,
+      estimated_delivery_text: safeOrder.estimatedDeliveryText ?? null,
+      stock_deducted: Boolean(safeOrder.stockDeducted),
+      idempotency_key: safeOrder.idempotencyKey ?? null,
+      status: safeOrder.status,
+      status_history: safeOrder.statusHistory,
+      created_at: safeOrder.createdAt,
+      updated_at: safeOrder.updatedAt,
+    });
+    if (error) {
+      if (couponClaimed && cleanCoupon) {
+        await decrementCouponUsageSupabase(supabase, safeOrder.restaurantId, cleanCoupon).catch(
+          () => {}
+        );
+      }
+      if (error.code === '23505' && safeOrder.idempotencyKey) {
+        const racedExisting = await findOrderByIdempotencyKey(
+          env,
+          safeOrder.restaurantId,
+          safeOrder.idempotencyKey
+        );
+        if (racedExisting) {
+          return { order: racedExisting, deduplicated: true };
+        }
+      }
+      throw new Error(`تعذر حفظ الطلب في قاعدة البيانات: ${error.message}`);
+    }
+    await insertOrderItemsSupabase(supabase, safeOrder);
+    await upsertCustomerForOrderSupabase(supabase, safeOrder).catch((err) => {
+      console.error('Customer upsert warning:', err);
+    });
+    await insertOrderNotificationSupabase(supabase, safeOrder).catch(() => {});
+    return { order: safeOrder, deduplicated: false };
+  } else if (isProductionSupabaseRequired(env)) {
+    throw new Error('Supabase configuration is required in production mode.');
   }
 
-  db.notifications.unshift({
-    id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-    restaurantId: safeOrder.restaurantId,
-    type: 'order',
-    title: `طلب جديد #${safeOrder.orderNumber}`,
-    message: `طلب من ${safeOrder.customerName} بقيمة ${safeOrder.total} ج.م.`,
-    isRead: false,
-    createdAt: safeOrder.createdAt,
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    if (safeOrder.idempotencyKey) {
+      const existing = db.orders.find(
+        (o) =>
+          o.restaurantId === safeOrder.restaurantId &&
+          o.idempotencyKey === safeOrder.idempotencyKey
+      );
+      if (existing) return { order: existing, deduplicated: true };
+    }
+
+    const qtyByItemId = new Map<string, number>();
+    for (const oi of safeOrder.items) {
+      qtyByItemId.set(oi.itemId, (qtyByItemId.get(oi.itemId) ?? 0) + oi.quantity);
+    }
+    for (const [itemId, needed] of qtyByItemId.entries()) {
+      const catItem = db.items.find(
+        (i) => i.id === itemId && i.restaurantId === safeOrder.restaurantId
+      );
+      if (!catItem || !catItem.isAvailable || (catItem.stockQuantity ?? 0) < needed) {
+        throw new StoreConflictError(
+          `الكمية المطلوبة من "${catItem?.name ?? itemId}" لم تعد متوفرة حالياً.`,
+          409
+        );
+      }
+    }
+
+    const cleanCoupon = couponCode?.trim().toUpperCase();
+    if (cleanCoupon) {
+      const cIdx = db.coupons.findIndex(
+        (c) => c.restaurantId === safeOrder.restaurantId && c.code.toUpperCase() === cleanCoupon
+      );
+      if (cIdx < 0) {
+        throw new StoreConflictError('كود الخصم غير موجود أو غير مفعل.', 409);
+      }
+      const cpn = db.coupons[cIdx];
+      const limit = cpn.usageLimit ?? 0;
+      const used = cpn.usedCount ?? 0;
+      if (!cpn.isActive || (limit > 0 && used >= limit)) {
+        throw new StoreConflictError('تم استنفاد الحد الأقصى لاستخدام كود الخصم.', 409);
+      }
+      db.coupons[cIdx] = { ...cpn, usedCount: used + 1 };
+    }
+
+    db.orders.unshift(safeOrder);
+
+    const cleanPhone = safeOrder.customerPhone.trim();
+    if (cleanPhone) {
+      const custIdx = db.customers.findIndex(
+        (c) => c.restaurantId === safeOrder.restaurantId && c.phone === cleanPhone
+      );
+      if (custIdx >= 0) {
+        const existing = db.customers[custIdx];
+        db.customers[custIdx] = {
+          ...existing,
+          name: safeOrder.customerName,
+          defaultAddress: safeOrder.customerAddress || existing.defaultAddress,
+          lastZoneId: safeOrder.deliveryZoneId || existing.lastZoneId,
+          ordersCount: existing.ordersCount + 1,
+          totalSpent: existing.totalSpent + safeOrder.total,
+          lastOrderAt: safeOrder.createdAt,
+          updatedAt: safeOrder.createdAt,
+        };
+      } else {
+        db.customers.unshift({
+          id: `cust_${safeOrder.restaurantId}_${cleanPhone.replace(/[^\d]/g, '') || cleanPhone}`,
+          restaurantId: safeOrder.restaurantId,
+          name: safeOrder.customerName,
+          phone: cleanPhone,
+          defaultAddress: safeOrder.customerAddress || '',
+          lastZoneId: safeOrder.deliveryZoneId || undefined,
+          ordersCount: 1,
+          totalSpent: safeOrder.total,
+          lastOrderAt: safeOrder.createdAt,
+          createdAt: safeOrder.createdAt,
+          updatedAt: safeOrder.createdAt,
+        });
+      }
+    }
+
+    db.notifications.unshift({
+      id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      restaurantId: safeOrder.restaurantId,
+      type: 'order',
+      title: `طلب جديد #${safeOrder.orderNumber}`,
+      message: `طلب من ${safeOrder.customerName} بقيمة ${safeOrder.total} ج.م.`,
+      isRead: false,
+      createdAt: safeOrder.createdAt,
+    });
+    db.notifications = db.notifications.slice(0, 40);
+    await writeEdgeDb(env, db);
+    return { order: safeOrder, deduplicated: false };
   });
-  db.notifications = db.notifications.slice(0, 40);
-  await writeEdgeDb(env, db);
-  return safeOrder;
 }
 
 export async function adjustItemStock(
@@ -1230,50 +1462,52 @@ export async function adjustItemStock(
     return updatedItem;
   }
 
-  const db = await readEdgeDb(env);
-  const idx = db.items.findIndex((i) => i.id === itemId && i.restaurantId === restaurantId);
-  if (idx < 0) return null;
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    const idx = db.items.findIndex((i) => i.id === itemId && i.restaurantId === restaurantId);
+    if (idx < 0) return null;
 
-  const item = db.items[idx];
-  const prevQty = Number(item.stockQuantity ?? 0);
-  const nextQty = Math.max(0, prevQty + delta);
-  const updatedItem: MenuItem = {
-    ...item,
-    stockQuantity: nextQty,
-    isAvailable: nextQty === 0 ? false : item.isAvailable,
-  };
-  db.items[idx] = updatedItem;
+    const item = db.items[idx];
+    const prevQty = Number(item.stockQuantity ?? 0);
+    const nextQty = Math.max(0, prevQty + delta);
+    const updatedItem: MenuItem = {
+      ...item,
+      stockQuantity: nextQty,
+      isAvailable: nextQty === 0 ? false : item.isAvailable,
+    };
+    db.items[idx] = updatedItem;
 
-  const movement: InventoryMovement = {
-    id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    restaurantId,
-    itemId: item.id,
-    itemName: item.name,
-    change: delta,
-    previousQty: prevQty,
-    newQty: nextQty,
-    reason,
-    referenceOrderId,
-    createdAt: new Date().toISOString(),
-  };
-  db.inventoryMovements.unshift(movement);
-  db.inventoryMovements = db.inventoryMovements.slice(0, 120);
-
-  const lowStockThreshold = updatedItem.lowStockThreshold ?? 8;
-  if (nextQty <= lowStockThreshold && prevQty > lowStockThreshold) {
-    db.notifications.unshift({
-      id: `notif_stock_${Date.now()}`,
+    const movement: InventoryMovement = {
+      id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       restaurantId,
-      type: 'stock',
-      title: 'تنبيه انخفاض المخزون',
-      message: `صنف "${updatedItem.name}" وصل إلى ${nextQty} وحدات متبقية.`,
-      isRead: false,
+      itemId: item.id,
+      itemName: item.name,
+      change: delta,
+      previousQty: prevQty,
+      newQty: nextQty,
+      reason,
+      referenceOrderId,
       createdAt: new Date().toISOString(),
-    });
-  }
+    };
+    db.inventoryMovements.unshift(movement);
+    db.inventoryMovements = db.inventoryMovements.slice(0, 120);
 
-  await writeEdgeDb(env, db);
-  return updatedItem;
+    const lowStockThreshold = updatedItem.lowStockThreshold ?? 8;
+    if (nextQty <= lowStockThreshold && prevQty > lowStockThreshold) {
+      db.notifications.unshift({
+        id: `notif_stock_${Date.now()}`,
+        restaurantId,
+        type: 'stock',
+        title: 'تنبيه انخفاض المخزون',
+        message: `صنف "${updatedItem.name}" وصل إلى ${nextQty} وحدات متبقية.`,
+        isRead: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    await writeEdgeDb(env, db);
+    return updatedItem;
+  });
 }
 
 export async function updateOrderStatus(
@@ -1286,7 +1520,6 @@ export async function updateOrderStatus(
   const nowIso = new Date().toISOString();
   const supabase = getSupabaseAdminClient(env);
 
-  let targetOrder: Order | null = null;
   if (supabase) {
     const { data, error } = await supabase
       .from('orders')
@@ -1297,66 +1530,112 @@ export async function updateOrderStatus(
     if (error) {
       throw new Error(`فشل قراءة الطلب: ${error.message}`);
     }
-    if (data) targetOrder = mapSupabaseOrder(data);
-  } else {
-    const db = await readEdgeDb(env);
-    targetOrder =
-      db.orders.find((o) => o.id === orderId && o.restaurantId === restaurantId) ?? null;
-  }
+    if (!data) return null;
+    const targetOrder = mapSupabaseOrder(data);
 
-  if (!targetOrder) return null;
+    const shouldDeduct =
+      !targetOrder.stockDeducted &&
+      (status === 'accepted' ||
+        status === 'preparing' ||
+        status === 'out_for_delivery' ||
+        status === 'delivered');
 
-  const shouldDeduct =
-    !targetOrder.stockDeducted &&
-    (status === 'accepted' ||
-      status === 'preparing' ||
-      status === 'out_for_delivery' ||
-      status === 'delivered');
+    const shouldRestore = targetOrder.stockDeducted && status === 'cancelled';
+    let nextStockDeducted = Boolean(targetOrder.stockDeducted);
 
-  const shouldRestore = targetOrder.stockDeducted && status === 'cancelled';
-  let nextStockDeducted = Boolean(targetOrder.stockDeducted);
+    if (shouldDeduct) {
+      const qtyByItem = new Map<string, number>();
+      for (const oi of targetOrder.items) {
+        qtyByItem.set(oi.itemId, (qtyByItem.get(oi.itemId) ?? 0) + oi.quantity);
+      }
+      const itemIds = Array.from(qtyByItem.keys());
+      const { data: freshItems, error: itemsErr } = await supabase
+        .from('menu_items')
+        .select('id, name, stock_quantity')
+        .eq('restaurant_id', restaurantId)
+        .in('id', itemIds);
+      if (itemsErr) {
+        throw new Error(`فشل التحقق من المخزون: ${itemsErr.message}`);
+      }
+      const itemMap = new Map((freshItems ?? []).map((r) => [String(r.id), r]));
+      for (const [id, needed] of qtyByItem.entries()) {
+        const row = itemMap.get(id);
+        if (!row || Number(row.stock_quantity ?? 0) < needed) {
+          throw new StoreConflictError(
+            `المخزون غير كافٍ لاعتماد الطلب للصنف "${row?.name ?? id}".`,
+            409
+          );
+        }
+      }
 
-  if (shouldDeduct) {
-    for (const oi of targetOrder.items) {
-      await adjustItemStock(env, {
-        restaurantId,
-        itemId: oi.itemId,
-        delta: -oi.quantity,
-        reason: `خصم تلقائي عند اعتماد الطلب #${targetOrder.orderNumber}`,
-        referenceOrderId: targetOrder.id,
-      });
+      const { data: claimed, error: claimErr } = await supabase.rpc(
+        'claim_order_stock_deduction',
+        { p_restaurant_id: restaurantId, p_order_id: orderId }
+      );
+      if (!claimErr && claimed === true) {
+        for (const oi of targetOrder.items) {
+          await adjustItemStock(env, {
+            restaurantId,
+            itemId: oi.itemId,
+            delta: -oi.quantity,
+            reason: `خصم تلقائي عند اعتماد الطلب #${targetOrder.orderNumber}`,
+            referenceOrderId: targetOrder.id,
+          });
+        }
+        nextStockDeducted = true;
+      } else if (claimErr) {
+        const { data: condRows, error: condErr } = await supabase
+          .from('orders')
+          .update({ stock_deducted: true, updated_at: nowIso })
+          .eq('id', orderId)
+          .eq('restaurant_id', restaurantId)
+          .eq('stock_deducted', false)
+          .select('id');
+        if (condErr) throw new Error(`فشل قفل خصم المخزون: ${condErr.message}`);
+        if (condRows && condRows.length > 0) {
+          for (const oi of targetOrder.items) {
+            await adjustItemStock(env, {
+              restaurantId,
+              itemId: oi.itemId,
+              delta: -oi.quantity,
+              reason: `خصم تلقائي عند اعتماد الطلب #${targetOrder.orderNumber}`,
+              referenceOrderId: targetOrder.id,
+            });
+          }
+        }
+        nextStockDeducted = true;
+      } else {
+        nextStockDeducted = true;
+      }
+    } else if (shouldRestore) {
+      for (const oi of targetOrder.items) {
+        await adjustItemStock(env, {
+          restaurantId,
+          itemId: oi.itemId,
+          delta: oi.quantity,
+          reason: `إرجاع مخزون تلقائي لإلغاء الطلب #${targetOrder.orderNumber}`,
+          referenceOrderId: targetOrder.id,
+        });
+      }
+      nextStockDeducted = false;
     }
-    nextStockDeducted = true;
-  } else if (shouldRestore) {
-    for (const oi of targetOrder.items) {
-      await adjustItemStock(env, {
-        restaurantId,
-        itemId: oi.itemId,
-        delta: oi.quantity,
-        reason: `إرجاع مخزون تلقائي لإلغاء الطلب #${targetOrder.orderNumber}`,
-        referenceOrderId: targetOrder.id,
-      });
+
+    const history = Array.isArray(targetOrder.statusHistory)
+      ? [...targetOrder.statusHistory]
+      : [];
+    if (!history.some((h) => h.status === status) || history[history.length - 1]?.status !== status) {
+      history.push({ status, timestamp: nowIso });
     }
-    nextStockDeducted = false;
-  }
 
-  const history = Array.isArray(targetOrder.statusHistory)
-    ? [...targetOrder.statusHistory]
-    : [];
-  if (!history.some((h) => h.status === status) || history[history.length - 1]?.status !== status) {
-    history.push({ status, timestamp: nowIso });
-  }
+    const updatedOrder: Order = {
+      ...targetOrder,
+      status,
+      stockDeducted: nextStockDeducted,
+      paymentStatus: status === 'delivered' ? 'paid' : targetOrder.paymentStatus,
+      statusHistory: history,
+      updatedAt: nowIso,
+    };
 
-  const updatedOrder: Order = {
-    ...targetOrder,
-    status,
-    stockDeducted: nextStockDeducted,
-    paymentStatus: status === 'delivered' ? 'paid' : targetOrder.paymentStatus,
-    statusHistory: history,
-    updatedAt: nowIso,
-  };
-
-  if (supabase) {
     const { error: updErr } = await supabase
       .from('orders')
       .update({
@@ -1382,24 +1661,139 @@ export async function updateOrderStatus(
     return updatedOrder;
   }
 
-  const freshDb = await readEdgeDb(env);
-  const freshIdx = freshDb.orders.findIndex(
-    (o) => o.id === orderId && o.restaurantId === restaurantId
-  );
-  if (freshIdx >= 0) {
-    freshDb.orders[freshIdx] = updatedOrder;
-  }
-  freshDb.activityLogs.unshift({
-    id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-    restaurantId,
-    actorName,
-    action: `تحديث حالة الطلب #${updatedOrder.orderNumber}`,
-    details: `تم تغيير الحالة إلى ${status}`,
-    createdAt: nowIso,
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    const orderIdx = db.orders.findIndex(
+      (o) => o.id === orderId && o.restaurantId === restaurantId
+    );
+    if (orderIdx < 0) return null;
+
+    const targetOrder = db.orders[orderIdx];
+    const shouldDeduct =
+      !targetOrder.stockDeducted &&
+      (status === 'accepted' ||
+        status === 'preparing' ||
+        status === 'out_for_delivery' ||
+        status === 'delivered');
+
+    const shouldRestore = Boolean(targetOrder.stockDeducted) && status === 'cancelled';
+    let nextStockDeducted = Boolean(targetOrder.stockDeducted);
+
+    if (shouldDeduct) {
+      const qtyByItem = new Map<string, number>();
+      for (const oi of targetOrder.items) {
+        qtyByItem.set(oi.itemId, (qtyByItem.get(oi.itemId) ?? 0) + oi.quantity);
+      }
+      for (const [id, needed] of qtyByItem.entries()) {
+        const catItem = db.items.find((i) => i.id === id && i.restaurantId === restaurantId);
+        if (!catItem || (catItem.stockQuantity ?? 0) < needed) {
+          throw new StoreConflictError(
+            `المخزون غير كافٍ لاعتماد الطلب للصنف "${catItem?.name ?? id}".`,
+            409
+          );
+        }
+      }
+
+      for (const oi of targetOrder.items) {
+        const itemIdx = db.items.findIndex(
+          (i) => i.id === oi.itemId && i.restaurantId === restaurantId
+        );
+        if (itemIdx < 0) continue;
+        const item = db.items[itemIdx];
+        const prevQty = Number(item.stockQuantity ?? 0);
+        const nextQty = Math.max(0, prevQty - oi.quantity);
+        const updatedItem: MenuItem = {
+          ...item,
+          stockQuantity: nextQty,
+          isAvailable: nextQty === 0 ? false : item.isAvailable,
+        };
+        db.items[itemIdx] = updatedItem;
+        db.inventoryMovements.unshift({
+          id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          restaurantId,
+          itemId: item.id,
+          itemName: item.name,
+          change: -oi.quantity,
+          previousQty: prevQty,
+          newQty: nextQty,
+          reason: `خصم تلقائي عند اعتماد الطلب #${targetOrder.orderNumber}`,
+          referenceOrderId: targetOrder.id,
+          createdAt: nowIso,
+        });
+        const lowStockThreshold = updatedItem.lowStockThreshold ?? 8;
+        if (nextQty <= lowStockThreshold && prevQty > lowStockThreshold) {
+          db.notifications.unshift({
+            id: `notif_stock_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            restaurantId,
+            type: 'stock',
+            title: 'تنبيه انخفاض المخزون',
+            message: `صنف "${updatedItem.name}" وصل إلى ${nextQty} وحدات متبقية.`,
+            isRead: false,
+            createdAt: nowIso,
+          });
+        }
+      }
+      nextStockDeducted = true;
+    } else if (shouldRestore) {
+      for (const oi of targetOrder.items) {
+        const itemIdx = db.items.findIndex(
+          (i) => i.id === oi.itemId && i.restaurantId === restaurantId
+        );
+        if (itemIdx < 0) continue;
+        const item = db.items[itemIdx];
+        const prevQty = Number(item.stockQuantity ?? 0);
+        const nextQty = Math.max(0, prevQty + oi.quantity);
+        db.items[itemIdx] = {
+          ...item,
+          stockQuantity: nextQty,
+        };
+        db.inventoryMovements.unshift({
+          id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          restaurantId,
+          itemId: item.id,
+          itemName: item.name,
+          change: oi.quantity,
+          previousQty: prevQty,
+          newQty: nextQty,
+          reason: `إرجاع مخزون تلقائي لإلغاء الطلب #${targetOrder.orderNumber}`,
+          referenceOrderId: targetOrder.id,
+          createdAt: nowIso,
+        });
+      }
+      nextStockDeducted = false;
+    }
+
+    db.inventoryMovements = db.inventoryMovements.slice(0, 120);
+
+    const history = Array.isArray(targetOrder.statusHistory)
+      ? [...targetOrder.statusHistory]
+      : [];
+    if (!history.some((h) => h.status === status) || history[history.length - 1]?.status !== status) {
+      history.push({ status, timestamp: nowIso });
+    }
+
+    const updatedOrder: Order = {
+      ...targetOrder,
+      status,
+      stockDeducted: nextStockDeducted,
+      paymentStatus: status === 'delivered' ? 'paid' : targetOrder.paymentStatus,
+      statusHistory: history,
+      updatedAt: nowIso,
+    };
+
+    db.orders[orderIdx] = updatedOrder;
+    db.activityLogs.unshift({
+      id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      restaurantId,
+      actorName,
+      action: `تحديث حالة الطلب #${updatedOrder.orderNumber}`,
+      details: `تم تغيير الحالة إلى ${status}`,
+      createdAt: nowIso,
+    });
+    db.activityLogs = db.activityLogs.slice(0, 100);
+    await writeEdgeDb(env, db);
+    return updatedOrder;
   });
-  freshDb.activityLogs = freshDb.activityLogs.slice(0, 100);
-  await writeEdgeDb(env, freshDb);
-  return updatedOrder;
 }
 
 export async function updateOrderPaymentStatus(
@@ -1790,20 +2184,77 @@ export async function upsertEmployee(
   return safe;
 }
 
-export async function updateEmployeePassword(
+export async function getEmployeeAuthState(
   env: EdgeEnv,
   restaurantId: string,
-  email: string,
-  newPassword: string
-): Promise<boolean> {
+  email: string
+): Promise<{
+  exists: boolean;
+  isActive: boolean;
+  role?: EmployeeRole;
+  passwordChangedAt?: number;
+}> {
   const clean = email.trim().toLowerCase();
-  if (!clean) return false;
-  const hashed = await hashPasswordPbkdf2(newPassword);
+  if (!clean) return { exists: false, isActive: false };
   const supabase = getSupabaseAdminClient(env);
   if (supabase) {
     const { data, error } = await supabase
       .from('employees')
-      .update({ password_hash: hashed, must_change_password: false })
+      .select('role, is_active, password_changed_at')
+      .eq('restaurant_id', restaurantId)
+      .ilike('email', clean)
+      .maybeSingle();
+    if (error || !data) {
+      return { exists: false, isActive: false };
+    }
+    const dbTs = data.password_changed_at
+      ? Date.parse(String(data.password_changed_at))
+      : undefined;
+    const memTs = memoryEmployeePasswordChangedAt.get(`${restaurantId}:${clean}`);
+    const passwordChangedAt = Math.max(dbTs || 0, memTs || 0) || undefined;
+    return {
+      exists: true,
+      isActive: data.is_active !== false,
+      role: String(data.role || 'cashier') as EmployeeRole,
+      passwordChangedAt,
+    };
+  }
+
+  const db = await readEdgeDb(env);
+  const found = db.employees.find(
+    (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean
+  );
+  if (!found) return { exists: false, isActive: false };
+  return {
+    exists: true,
+    isActive: found.isActive !== false,
+    role: found.role,
+    passwordChangedAt: found.passwordChangedAt,
+  };
+}
+
+export async function updateEmployeePassword(
+  env: EdgeEnv,
+  restaurantId: string,
+  email: string,
+  newPassword: string,
+  minPrevIatMs = 0
+): Promise<{ updated: boolean; passwordChangedAt?: number }> {
+  const clean = email.trim().toLowerCase();
+  if (!clean) return { updated: false };
+  const hashed = await hashPasswordPbkdf2(newPassword);
+  const changedAt = Math.max(Date.now(), minPrevIatMs + 1);
+  memoryEmployeePasswordChangedAt.set(`${restaurantId}:${clean}`, changedAt);
+
+  const supabase = getSupabaseAdminClient(env);
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('employees')
+      .update({
+        password_hash: hashed,
+        must_change_password: false,
+        password_changed_at: new Date(changedAt).toISOString(),
+      })
       .eq('restaurant_id', restaurantId)
       .ilike('email', clean)
       .select('id')
@@ -1811,21 +2262,24 @@ export async function updateEmployeePassword(
     if (error) {
       throw new Error(`فشل تحديث كلمة مرور الموظف: ${error.message}`);
     }
-    return Boolean(data);
+    return { updated: Boolean(data), passwordChangedAt: changedAt };
   }
 
-  const db = await readEdgeDb(env);
-  const idx = db.employees.findIndex(
-    (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean
-  );
-  if (idx < 0) return false;
-  db.employees[idx] = {
-    ...db.employees[idx],
-    passwordHash: hashed,
-    mustChangePassword: false,
-  };
-  await writeEdgeDb(env, db);
-  return true;
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    const idx = db.employees.findIndex(
+      (e) => e.restaurantId === restaurantId && e.email.toLowerCase() === clean
+    );
+    if (idx < 0) return { updated: false };
+    db.employees[idx] = {
+      ...db.employees[idx],
+      passwordHash: hashed,
+      mustChangePassword: false,
+      passwordChangedAt: changedAt,
+    };
+    await writeEdgeDb(env, db);
+    return { updated: true, passwordChangedAt: changedAt };
+  });
 }
 
 export async function deleteEmployee(
@@ -2039,10 +2493,77 @@ export async function verifyAdminPassword(env: EdgeEnv, candidate: string): Prom
   return constantTimeEqual(candidate, initialPass);
 }
 
-export async function setAdminPassword(env: EdgeEnv, newPassword: string): Promise<void> {
+export async function setAdminPassword(
+  env: EdgeEnv,
+  newPassword: string,
+  minPrevIatMs = 0
+): Promise<number> {
+  const changedAt = Math.max(Date.now(), minPrevIatMs + 1);
+  memoryOwnerPasswordChangedAt = changedAt;
+  const hash = await hashPasswordPbkdf2(newPassword);
+  return withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    db.adminPasswordOverride = hash;
+    db.adminPasswordChangedAt = changedAt;
+    await writeEdgeDb(env, db);
+    return changedAt;
+  });
+}
+
+export async function getOwnerPasswordChangedAt(env: EdgeEnv): Promise<number | null> {
   const db = await readEdgeDb(env);
-  db.adminPasswordOverride = await hashPasswordPbkdf2(newPassword);
-  await writeEdgeDb(env, db);
+  const localTs = db.adminPasswordChangedAt ?? null;
+  if (memoryOwnerPasswordChangedAt && (!localTs || memoryOwnerPasswordChangedAt > localTs)) {
+    return memoryOwnerPasswordChangedAt;
+  }
+  return localTs;
+}
+
+export async function revokeAdminToken(
+  env: EdgeEnv,
+  jti: string,
+  expMs: number
+): Promise<void> {
+  if (!jti) return;
+  const safeExp = expMs > Date.now() ? expMs : Date.now() + 1000 * 60 * 60 * 24;
+  memoryRevokedJtis.set(jti, safeExp);
+  const kv = env.RATE_LIMIT_KV || env.RESTAURANT_DB;
+  if (kv) {
+    const ttl = Math.max(60, Math.ceil((safeExp - Date.now()) / 1000));
+    await kv.put(`revoked_jti:${jti}`, String(safeExp), { expirationTtl: ttl }).catch(() => {});
+  }
+  if (isSupabaseBackendActive(env)) return;
+  await withEdgeDbLock(async () => {
+    const db = await readEdgeDb(env);
+    const map = { ...(db.revokedTokenJtis ?? {}) };
+    const now = Date.now();
+    for (const [k, exp] of Object.entries(map)) {
+      if (exp <= now) delete map[k];
+    }
+    map[jti] = safeExp;
+    db.revokedTokenJtis = map;
+    await writeEdgeDb(env, db);
+  });
+}
+
+export async function isAdminTokenRevoked(env: EdgeEnv, jti?: string): Promise<boolean> {
+  if (!jti) return false;
+  const memExp = memoryRevokedJtis.get(jti);
+  if (memExp !== undefined) {
+    if (memExp > Date.now()) return true;
+    memoryRevokedJtis.delete(jti);
+  }
+  const kv = env.RATE_LIMIT_KV || env.RESTAURANT_DB;
+  if (kv) {
+    const raw = await kv.get(`revoked_jti:${jti}`, 'text').catch(() => null);
+    if (typeof raw === 'string' && Number(raw) > Date.now()) {
+      return true;
+    }
+  }
+  if (isSupabaseBackendActive(env)) return false;
+  const db = await readEdgeDb(env);
+  const persistedExp = db.revokedTokenJtis?.[jti];
+  return typeof persistedExp === 'number' && persistedExp > Date.now();
 }
 
 export async function uploadImageAsset(

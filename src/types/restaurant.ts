@@ -128,6 +128,7 @@ export interface Employee {
   isActive: boolean;
   passwordHash?: string;
   mustChangePassword?: boolean;
+  passwordChangedAt?: number;
   createdAt: string;
 }
 
