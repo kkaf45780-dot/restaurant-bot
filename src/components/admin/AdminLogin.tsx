@@ -1,11 +1,27 @@
 import { ArrowRight, Lock } from 'lucide-react';
 import { useState } from 'react';
-import { adminLoginLocal, fetchAdminMe } from '../../lib/api.ts';
+import { adminLoginLocal, ApiError, fetchAdminMe } from '../../lib/api.ts';
 import { isSupabaseClientConfigured, supabase } from '../../lib/supabase.ts';
 
 interface AdminLoginProps {
   onSuccess: (token: string, email: string) => void;
   onBackToStore: () => void;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
 }
 
 export function AdminLogin({
@@ -27,34 +43,41 @@ export function AdminLogin({
 
     setLoading(true);
     try {
-      if (isSupabaseClientConfigured && supabase) {
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password,
-        });
-        if (!error && data.session?.access_token) {
-          try {
-            await fetchAdminMe(data.session.access_token);
-          } catch {
-            await supabase.auth.signOut().catch(() => {});
-            throw new Error('هذا الحساب غير مصرح له بالدخول إلى لوحة تحكم المدير.');
-          }
-          onSuccess(data.session.access_token, data.user?.email ?? email.trim());
-          return;
-        }
-        if (error) {
-          try {
-            const localRes = await adminLoginLocal(email.trim(), password);
-            onSuccess(localRes.token, localRes.email);
-            return;
-          } catch {
-            throw new Error('بيانات الدخول غير صحيحة. تأكد من البريد الإلكتروني وكلمة المرور.');
-          }
+      // Cloudflare owner credentials are the primary admin login method.
+      // Try them first so a slow/unavailable Supabase Auth request cannot block the owner.
+      try {
+        const localRes = await adminLoginLocal(email.trim(), password);
+        onSuccess(localRes.token, localRes.email);
+        return;
+      } catch (localError) {
+        // Only a normal credential mismatch should fall through to Supabase employee auth.
+        if (localError instanceof ApiError && localError.status !== 401) {
+          throw localError;
         }
       }
 
-      const res = await adminLoginLocal(email.trim(), password);
-      onSuccess(res.token, res.email);
+      if (isSupabaseClientConfigured && supabase) {
+        const { data, error } = await withTimeout(
+          supabase.auth.signInWithPassword({
+            email: email.trim(),
+            password,
+          }),
+          8000,
+          'تأخر رد خدمة تسجيل الدخول. تحقق من اتصال Supabase وحاول مرة أخرى.'
+        );
+
+        if (!error && data.session?.access_token) {
+          await withTimeout(
+            fetchAdminMe(data.session.access_token),
+            8000,
+            'تم التحقق من الحساب لكن تأخر تحميل صلاحيات المدير. حاول مرة أخرى.'
+          );
+          onSuccess(data.session.access_token, data.user?.email ?? email.trim());
+          return;
+        }
+      }
+
+      throw new Error('بيانات الدخول غير صحيحة. تأكد من البريد الإلكتروني وكلمة المرور.');
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : 'تعذر تسجيل الدخول، حاول مرة أخرى.'
