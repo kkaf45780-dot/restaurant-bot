@@ -337,13 +337,13 @@ language sql
 stable
 security definer
 set search_path = ''
-as $
+as $$
   select (select auth.uid()) is not null and exists (
     select 1 from public.restaurant_admins
     where restaurant_id = target_restaurant_id
       and user_id = (select auth.uid())
   );
-$;
+$$;
 
 drop policy if exists "Admins manage restaurants" on public.restaurants;
 create policy "Admins manage restaurants" on public.restaurants
