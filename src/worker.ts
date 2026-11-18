@@ -161,6 +161,9 @@ async function signAdminToken(
   email: string,
   role: EmployeeRole = 'owner'
 ): Promise<string> {
+  if (!secret || secret.length < 32) {
+    throw new Error('ADMIN_SESSION_SECRET must be configured with at least 32 characters.');
+  }
   const payloadJson = JSON.stringify({
     email,
     role,
@@ -175,7 +178,7 @@ async function verifyLocalAdminToken(
   secret: string,
   token: string
 ): Promise<{ email: string; role: EmployeeRole } | null> {
-  if (!token.startsWith('local.')) return null;
+  if (!secret || secret.length < 32 || !token.startsWith('local.')) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [, payload, sig] = parts;
@@ -198,6 +201,8 @@ async function verifyLocalAdminToken(
 }
 
 function getSessionSecret(env: EdgeEnv): string {
+  // Production mode never uses the bundled development secret.
+  if (env.REQUIRE_SUPABASE === 'true') return env.ADMIN_SESSION_SECRET || '';
   return env.ADMIN_SESSION_SECRET || DEFAULT_SESSION_SECRET;
 }
 
