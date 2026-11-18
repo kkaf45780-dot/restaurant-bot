@@ -67,11 +67,16 @@ export function AdminLogin({
         );
 
         if (!error && data.session?.access_token) {
-          await withTimeout(
-            fetchAdminMe(data.session.access_token),
-            8000,
-            'تم التحقق من الحساب لكن تأخر تحميل صلاحيات المدير. حاول مرة أخرى.'
-          );
+          try {
+            await withTimeout(
+              fetchAdminMe(data.session.access_token),
+              8000,
+              'تم التحقق من الحساب لكن تأخر تحميل صلاحيات المدير. حاول مرة أخرى.'
+            );
+          } catch (error) {
+            await supabase.auth.signOut().catch(() => {});
+            throw error;
+          }
           onSuccess(data.session.access_token, data.user?.email ?? email.trim());
           return;
         }
