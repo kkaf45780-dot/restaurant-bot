@@ -311,6 +311,15 @@ async function handleApiRequest(request: Request, env: EdgeEnv): Promise<Respons
     return Response.json(getPublicConfigStatus());
   }
 
+  // Fail closed in production: never fall back to in-memory/KV demo data
+  // when the required Supabase service credential is missing.
+  if (env.REQUIRE_SUPABASE === 'true' && !isSupabaseBackendActive(env)) {
+    return Response.json(
+      { error: 'Backend is not configured yet. Please add the Supabase server secret.' },
+      { status: 503 }
+    );
+  }
+
   const kv = createKvAdapter(env);
   const clientIp = extractClientIpFromHeaders(request.headers);
   const secret = getSessionSecret(env);
