@@ -102,6 +102,7 @@ export function CustomerPage({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isUsingCachedBundle, setIsUsingCachedBundle] = useState(false);
+  const [cachedFallbackReason, setCachedFallbackReason] = useState<string | null>(null);
 
   const [menuInitialCat, setMenuInitialCat] = useState<string>('all');
   const [selectedProductModal, setSelectedProductModal] = useState<MenuItem | null>(null);
@@ -200,6 +201,7 @@ export function CustomerPage({
       setBundle(data.bundle);
       setHoursStatus(data.hoursStatus);
       setIsUsingCachedBundle(false);
+      setCachedFallbackReason(null);
       hydrateAfterBundle(data.bundle);
       try {
         localStorage.setItem(CACHED_BUNDLE_KEY, JSON.stringify(data));
@@ -207,6 +209,8 @@ export function CustomerPage({
         // Ignore quota exceeded
       }
     } catch (err) {
+      const reason =
+        err instanceof Error ? err.message : 'تعذر جلب أحدث بيانات القائمة من الخادم حالياً.';
       // Fallback to offline read-only cached menu snapshot if present
       try {
         const rawCached = localStorage.getItem(CACHED_BUNDLE_KEY);
@@ -219,6 +223,7 @@ export function CustomerPage({
             setBundle(cached.bundle);
             setHoursStatus(cached.hoursStatus);
             setIsUsingCachedBundle(true);
+            setCachedFallbackReason(reason);
             hydrateAfterBundle(cached.bundle);
             setLoading(false);
             return;
@@ -241,6 +246,7 @@ export function CustomerPage({
       setBundle(data.bundle);
       setHoursStatus(data.hoursStatus);
       setIsUsingCachedBundle(false);
+      setCachedFallbackReason(null);
       document.title = `موظف المطعم — ${data.bundle.restaurant.name}`;
       setSelectedProductModal((prev) => {
         if (!prev) return null;
@@ -259,6 +265,12 @@ export function CustomerPage({
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (isOnline && isUsingCachedBundle) {
+      void refreshPublicBundle();
+    }
+  }, [isOnline, isUsingCachedBundle, refreshPublicBundle]);
 
   useEffect(() => {
     const client = supabase;
@@ -728,12 +740,22 @@ export function CustomerPage({
       />
 
       {(!isOnline || isUsingCachedBundle) && (
-        <div className="bg-amber-600 text-white px-4 py-2 text-xs font-bold flex items-center justify-center gap-2 text-center">
+        <div className="bg-amber-600 text-white px-4 py-2 text-xs font-bold flex flex-wrap items-center justify-center gap-2 text-center">
           <WifiOff className="w-4 h-4 shrink-0" />
           <span>
-            أنت تتصفح آخر نسخة محفوظة من القائمة (وضع القراءة بدون إنترنت) — إرسال الطلبات متوقف
-            حتى عودة الاتصال.
+            {!isOnline
+              ? 'أنت تتصفح آخر نسخة محفوظة من القائمة (وضع القراءة بدون إنترنت) — إرسال الطلبات متوقف حتى عودة الاتصال.'
+              : `يتم عرض آخر نسخة محفوظة مؤقتاً بسبب تعذر الاتصال بالخادم${cachedFallbackReason ? ` (${cachedFallbackReason})` : ''}.`}
           </span>
+          {isOnline && isUsingCachedBundle && (
+            <button
+              type="button"
+              onClick={() => void refreshPublicBundle()}
+              className="px-3 py-1 rounded-lg bg-white/20 hover:bg-white/30 text-white text-[11px] font-extrabold transition-colors cursor-pointer"
+            >
+              تحديث الآن
+            </button>
+          )}
         </div>
       )}
 
